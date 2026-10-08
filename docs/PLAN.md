@@ -42,6 +42,10 @@ Each level is inpainted with the level below it frozen (VACE spatial masks; SD i
 3. **Edges:** 9 vertical and 9 horizontal strips for stills (36 + 36 animated strips for clips). Each strip straddles a tile seam, and is inpainted with its two end corners frozen.
 4. **Tiles:** 81 stills or 1296 clips, with the interior inpainted and all four edge strips frozen. For clips, the first and last frames are also frozen to the matching stills.
 
+### Placeholder rule (also the rule generated tiles must obey)
+
+A cell's content is drawn centered on a tile corner and never reaches more than one cell from its center. Overlapping effects are drawn in a fixed order by layer, never by cell. With that, the 4 tiles sharing a cell all produce identical pixels for it.
+
 ### Atlas constraints
 
 - WebGL2 only guarantees 256 texture-array layers; typical hardware allows 2048. 81 stills fit as layers. 1296 clips × 16 frames does not, so clips will need **pages**: each layer becomes a grid of tiles, with gutters and clamped LOD.
@@ -52,15 +56,15 @@ Each level is inpainted with the level below it frozen (VACE spatial masks; SD i
 
 - [x] v0 per-cell renderer, procedural placeholder, Wan VACE generator, turnstile lease client
 - [x] Binary assets moved outside the repo, plus a Vite plugin to serve them
-- [ ] **M1: dual-grid renderer** with a procedural placeholder stills atlas (81 layers). Renderer selector: flat / cell sprites / dual tiles. Validate the vertex math, config indexing, edge-of-grid handling, and wrap.
+- [x] **M1: dual-grid renderer** (`dualFrag`, `loadTiles`/`placeholderTiles` in `src/atlas.ts`, plus a renderer select in the panel). It's checked in the browser: fire glow crosses tile borders seamlessly, canopies assemble from 4 quarters centered in their cells, and wrap and no-wrap edges both work. Within a step it currently **crossfades** from the previous configuration's still to the current one. M3 replaces that with clips.
 - [ ] **M2: generated stills.** World pass → corners → edges → 81 tiles, written as a v1 stills atlas. Success means no visible seams at 32–64 px cells.
 - [ ] **M3: generated clips.** Animated corners and edges → 1296 clips (batch several tiles per VACE run), paged atlas, transition playback over the step. Probably an overnight job on the 3080.
 - [ ] **M4: polish.** Texture compression, delete v0, and README/screenshots.
 
 ## Next steps
 
-1. M1: add `dualFrag` and a placeholder stills generator to `src/atlas.ts`. The placeholder draws, per tile, quarter canopies, flames or ash at the 4 corners, so it's seamless by construction and makes indexing bugs obvious. Add a renderer select in the panel.
-2. M2: write `tools/atlas/tiles.py`, kept separate from the v0 `generate.py`. Start with the 9×9 de Bruijn torus search and the world pass, then inspect the world image before building corners and edges.
+1. M2: write `tools/atlas/tiles.py`, kept separate from the v0 `generate.py`. Start with the 9×9 de Bruijn torus search and the world pass, then inspect the world image before building corners and edges.
+2. Output format (already read by `loadTiles`): `$TINDERBOX_DATA/atlas/tiles.json` `{"version": 1, "tile": N}` and `tiles.png`, a 9×9 grid of N-px tiles, row-major, where index = SW + 3·SE + 9·NW + 27·NE. Rows run top-down, so a tile's top edge is north.
 
 ## Open questions
 

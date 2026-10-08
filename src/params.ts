@@ -1,3 +1,5 @@
+import type { Renderer } from './sim';
+
 export interface Params {
   /** Cell edge length in CSS pixels. */
   cellSize: number;
@@ -14,8 +16,8 @@ export interface Params {
   /** Toroidal edges. */
   wrap: boolean;
   gridLines: boolean;
-  /** Animated sprites instead of flat colors. */
-  sprites: boolean;
+  /** flat colors, v0 per-cell sprites, or dual-grid tiles (docs/PLAN.md). */
+  renderer: Renderer;
   paused: boolean;
   panelHidden: boolean;
 }
@@ -29,7 +31,7 @@ export const defaults: Params = {
   moore: false,
   wrap: true,
   gridLines: true,
-  sprites: true,
+  renderer: 'dual',
   paused: false,
   panelHidden: false,
 };

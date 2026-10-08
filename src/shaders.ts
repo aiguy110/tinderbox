@@ -250,3 +250,62 @@ void main() {
   outColor = vec4(c, 1.0);
 }
 `;
+
+// Dual-grid renderer (docs/PLAN.md). Tiles sit on grid vertices and each
+// covers a quarter of the 4 cells around it, so a tile is chosen purely by
+// those 4 states and borders between tiles depend only on the cells they
+// pass through. For now tiles are stills keyed on the step-boundary states;
+// within a step we crossfade from the previous configuration to the current.
+export const dualFrag = /* glsl */ `${common}
+precision highp sampler2DArray;
+
+uniform usampler2D uState;
+uniform sampler2DArray uTiles;
+uniform float uCellPx;
+uniform bool uGridLines;
+uniform bool uWrap;
+uniform float uProgress;
+
+out vec4 outColor;
+
+ivec2 gridSize;
+
+uvec2 cellAt(ivec2 c) {
+  if (uWrap) {
+    c = (c + gridSize) % gridSize;
+  } else if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, gridSize))) {
+    return uvec2(EMPTY);
+  }
+  return texelFetch(uState, c, 0).rg; // (current, previous)
+}
+
+void main() {
+  gridSize = textureSize(uState, 0);
+  vec2 p = gl_FragCoord.xy / uCellPx;
+  ivec2 v = ivec2(floor(p + 0.5));
+  vec2 uv = p + 0.5 - vec2(v);
+
+  uvec2 sw = cellAt(v + ivec2(-1, -1));
+  uvec2 se = cellAt(v + ivec2(0, -1));
+  uvec2 nw = cellAt(v + ivec2(-1, 0));
+  uvec2 ne = cellAt(v + ivec2(0, 0));
+  uvec2 config = sw + 3u * se + 9u * nw + 27u * ne;
+
+  // Atlas rows run top-down; gradients come from the continuous p so mip
+  // selection doesn't spike at tile borders.
+  vec2 st = vec2(uv.x, 1.0 - uv.y);
+  vec2 gx = dFdx(p) * vec2(1.0, -1.0);
+  vec2 gy = dFdy(p) * vec2(1.0, -1.0);
+  vec3 cur = textureGrad(uTiles, vec3(st, float(config.x)), gx, gy).rgb;
+  vec3 prev = textureGrad(uTiles, vec3(st, float(config.y)), gx, gy).rgb;
+  vec3 c = mix(prev, cur, smoothstep(0.0, 1.0, clamp(uProgress, 0.0, 1.0)));
+
+  if (uGridLines) {
+    vec2 g = fract(p);
+    float edge = step(g.x, 1.0 / uCellPx) + step(g.y, 1.0 / uCellPx);
+    c *= 1.0 - 0.35 * min(edge, 1.0);
+  }
+
+  outColor = vec4(c, 1.0);
+}
+`;

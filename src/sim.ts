@@ -1,10 +1,13 @@
-import { type Atlas, uploadAtlas } from './atlas';
-import { Cause, State, flatFrag, fullscreenVert, spriteFrag, stepFrag } from './shaders';
+import { type Atlas, type TileAtlas, uploadAtlas } from './atlas';
+import { Cause, State, dualFrag, flatFrag, fullscreenVert, spriteFrag, stepFrag } from './shaders';
+
+export type Renderer = 'flat' | 'cells' | 'dual';
 
 export interface RenderOptions {
   gridLines: boolean;
-  /** Use the sprite atlas, if one is loaded. */
-  sprites: boolean;
+  /** Falls back to flat until the renderer's atlas has loaded. */
+  renderer: Renderer;
+  wrap: boolean;
   /** How far through the current step, 0 to 1. Drives transition clips. */
   progress: number;
   /** Seconds. Drives looping idle clips. */
@@ -38,10 +41,13 @@ export class ForestFire {
   private stepProg: WebGLProgram;
   private flatProg: WebGLProgram;
   private spriteProg: WebGLProgram;
+  private dualProg: WebGLProgram;
   private stepU: Uniforms;
   private flatU: Uniforms;
   private spriteU: Uniforms;
+  private dualU: Uniforms;
   private atlas: { tex: WebGLTexture; data: Atlas } | null = null;
+  private tiles: WebGLTexture | null = null;
   private vao: WebGLVertexArrayObject;
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -51,11 +57,13 @@ export class ForestFire {
     this.stepProg = link(gl, fullscreenVert, stepFrag);
     this.flatProg = link(gl, fullscreenVert, flatFrag);
     this.spriteProg = link(gl, fullscreenVert, spriteFrag);
+    this.dualProg = link(gl, fullscreenVert, dualFrag);
     this.stepU = uniforms(gl, this.stepProg, ['uState', 'uSeed', 'uGrowth', 'uLightning', 'uMoore', 'uWrap']);
     this.flatU = uniforms(gl, this.flatProg, ['uState', 'uCellPx', 'uGridLines']);
     this.spriteU = uniforms(gl, this.spriteProg, [
       'uState', 'uAtlas', 'uCellPx', 'uGridLines', 'uProgress', 'uTime', 'uClipFrames', 'uClipSeconds',
     ]);
+    this.dualU = uniforms(gl, this.dualProg, ['uState', 'uTiles', 'uCellPx', 'uGridLines', 'uWrap', 'uProgress']);
     this.vao = gl.createVertexArray()!;
   }
 
@@ -134,14 +142,20 @@ export class ForestFire {
     this.atlas = { tex: uploadAtlas(this.gl, data), data };
   }
 
+  setTiles(data: TileAtlas) {
+    if (this.tiles) this.gl.deleteTexture(this.tiles);
+    this.tiles = uploadAtlas(this.gl, data);
+  }
+
   render(o: RenderOptions) {
     if (!this.buffers) return;
     const gl = this.gl;
-    const sprites = o.sprites && this.atlas;
-    const u = sprites ? this.spriteU : this.flatU;
+    const sprites = o.renderer === 'cells' && this.atlas;
+    const dual = o.renderer === 'dual' && this.tiles;
+    const [prog, u] = sprites ? [this.spriteProg, this.spriteU] : dual ? [this.dualProg, this.dualU] : [this.flatProg, this.flatU];
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.useProgram(sprites ? this.spriteProg : this.flatProg);
+    gl.useProgram(prog);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.buffers[this.current].tex);
     gl.uniform1i(u.uState, 0);
@@ -156,6 +170,13 @@ export class ForestFire {
       gl.uniform1f(u.uTime, o.time);
       gl.uniform2iv(u.uClipFrames, data.clips.flatMap((c) => [c.first, c.frames]));
       gl.uniform1fv(u.uClipSeconds, data.clips.map((c) => c.seconds));
+    }
+    if (dual) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, dual);
+      gl.uniform1i(u.uTiles, 1);
+      gl.uniform1i(u.uWrap, o.wrap ? 1 : 0);
+      gl.uniform1f(u.uProgress, o.progress);
     }
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

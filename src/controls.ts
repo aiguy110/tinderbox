@@ -1,4 +1,5 @@
 import { defaults, type Params } from './params';
+import type { Renderer } from './sim';
 
 export interface ControlHandlers {
   onChange(key: keyof Params): void;
@@ -33,12 +34,17 @@ const sliders: SliderSpec[] = [
   { key: 'initialDensity', label: 'Seed density', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%` },
 ];
 
-const toggles: { key: 'moore' | 'wrap' | 'gridLines' | 'sprites' | 'paused'; label: string }[] = [
+const renderers: { value: Renderer; label: string }[] = [
+  { value: 'dual', label: 'Dual-grid tiles' },
+  { value: 'cells', label: 'Cell sprites (v0)' },
+  { value: 'flat', label: 'Flat colors' },
+];
+
+const toggles: { key: 'moore' | 'wrap' | 'gridLines' | 'paused'; label: string }[] = [
   { key: 'paused', label: 'Paused' },
   { key: 'moore', label: '8-neighbor spread' },
   { key: 'wrap', label: 'Wrap edges' },
   { key: 'gridLines', label: 'Grid lines' },
-  { key: 'sprites', label: 'Sprites' },
 ];
 
 export function buildControls(root: HTMLElement, params: Params, h: ControlHandlers): Controls {
@@ -96,6 +102,17 @@ export function buildControls(root: HTMLElement, params: Params, h: ControlHandl
   const syncRatio = () => (ratio.textContent = `p/f ≈ ${Math.round(params.growth / params.lightning).toLocaleString()}`);
   syncers.push(syncRatio);
   root.addEventListener('input', syncRatio);
+
+  const renderRow = document.createElement('label');
+  renderRow.className = 'row select';
+  renderRow.innerHTML = `<span>Renderer</span><select>${renderers.map((r) => `<option value="${r.value}">${r.label}</option>`).join('')}</select>`;
+  const select = renderRow.querySelector('select')!;
+  syncers.push(() => (select.value = params.renderer));
+  select.addEventListener('change', () => {
+    params.renderer = select.value as Renderer;
+    h.onChange('renderer');
+  });
+  root.appendChild(renderRow);
 
   const checks = document.createElement('div');
   checks.className = 'checks';

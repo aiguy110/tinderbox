@@ -125,6 +125,20 @@ body {
   accent-color: #ff8c32;
 }
 
+.row.select {
+  align-items: center;
+  margin-top: 10px;
+}
+
+.row select {
+  padding: 3px 4px;
+  border: 1px solid #4a423a;
+  border-radius: 6px;
+  background: #2a2420;
+  color: inherit;
+  font: inherit;
+}
+
 .checks {
   display: grid;
   grid-template-columns: 1fr 1fr;
