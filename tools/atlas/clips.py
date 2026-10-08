@@ -188,9 +188,24 @@ def collage_video(g: np.ndarray, sp: Sprites) -> list[Image.Image]:
 
 # --- Diffusion -------------------------------------------------------------
 
+def anchored(g: np.ndarray, frames: list[Image.Image], stills: np.ndarray) -> list[Image.Image]:
+    """The collage with its first and last frames replaced by the stitched
+    still worlds of the previous and current states (collage outside the
+    tiled interior)."""
+    out = list(frames)
+    for f, states in [(0, PREV[g]), (FRAMES - 1, CUR[g])]:
+        still = still_world(states, stills)
+        base = np.asarray(frames[f], np.float32)
+        out[f] = Image.fromarray(np.where(np.isnan(still), base, still).round().clip(0, 255).astype(np.uint8))
+    return out
+
+
 def harmonize_video(frames: list[Image.Image], seed: int, strength: float) -> np.ndarray:
     """SDEdit as in tiles.harmonize, but starting the schedule at the
-    strength's step instead of computing and discarding the earlier ones."""
+    strength's step instead of computing and discarding the earlier ones.
+    The first and last frames are also given to VACE as frames to keep:
+    without them the model slowly repaints the ground over the clip, and the
+    ends wouldn't meet the stills."""
     import torch
     from diffusers import FlowMatchEulerDiscreteScheduler
 
@@ -216,10 +231,13 @@ def harmonize_video(frames: list[Image.Image], seed: int, strength: float) -> np
     gen = torch.Generator("cpu").manual_seed(seed)
     noise = torch.randn((1, 16, (FRAMES - 1) // 4 + 1, W // VAE, W // VAE), generator=gen)
     x0 = encode_video(p, frames)
+    size = frames[0].size
+    keep, fill, gray = Image.new("L", size, 0), Image.new("L", size, 255), Image.new("RGB", size, (128, 128, 128))
+    ends = (0, FRAMES - 1)
     out = p(
-        video=frames,
-        mask=[Image.new("L", frames[0].size, 255)] * FRAMES,
-        conditioning_scale=0.0,
+        video=[frames[f] if f in ends else gray for f in range(FRAMES)],
+        mask=[keep if f in ends else fill for f in range(FRAMES)],
+        conditioning_scale=1.0,
         prompt_embeds=embed(CLIP_PROMPT).to("cuda"),
         negative_prompt_embeds=embed(NEGATIVE).to("cuda"),
         height=W,
@@ -379,12 +397,13 @@ def main():
 
     if args.stage in ("gen", "all"):
         sp = Sprites()
+        stills = load_stills()
         todo = [0] if args.probe else range(len(worlds))
         for wi in todo:
             path = WORK / f"raw_{wi:02d}.npy"
             if path.exists() and not args.probe:
                 continue
-            frames = collage_video(worlds[wi], sp)
+            frames = anchored(worlds[wi], collage_video(worlds[wi], sp), stills)
             lease = turnstile.acquire(est_seconds=600)
             try:
                 log.info("world %d/%d: harmonize", wi, len(worlds))
