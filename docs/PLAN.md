@@ -55,6 +55,7 @@ Tiles are centered on grid **vertices**, not cells. A tile covers one quarter of
 - **Hierarchical inpainting with frozen corners/strips** (VACE masks, re-pasted after each pass). The model treats the frozen lattice as content and paints a grid pattern; tile interiors ignore the configuration.
 - **VACE control from a color-blob layout.** It's bimodal: at conditioning scale 0.5 the layout is ignored; at 1.0 it's copied literally as flat blobs.
 - **SDEdit or ILVR (low-pass) guidance from a blurry layout.** The model keeps the blur: either blurry and on-layout, or sharp and off-layout.
+- **A clean ground keyframe** (plain soil, no grass tufts, to get rid of the green fleck). The stronger high-frequency texture gave the model room to drift at strength 0.6: trees ballooned and merged, flames lost their scorch discs, and ground came out reddish. The candidate is kept as `work/keyframes/ground_candidate.png`; the outputs are in `work/tiles/cleanground/`.
 - **Synchronizing latents during denoising** (averaging, or copying a leader occurrence, after every step, with identical start noise). Both turn the image into a degenerate repeated pattern. With UniPC it's worse, because the corrector reuses its stored pre-callback sample. If you edit latents in a callback, use `FlowMatchEulerDiscreteScheduler(shift=3.0)`.
 
 ### Placeholder rule (also the rule generated tiles must obey)
@@ -74,14 +75,15 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - [x] Binary assets moved outside the repo, plus a Vite plugin to serve them
 - [x] **M1: dual-grid renderer** (`dualFrag`, `loadTiles`/`placeholderTiles` in `src/atlas.ts`, plus a renderer select in the panel). It's checked in the browser: fire glow crosses tile borders seamlessly, canopies assemble from 4 quarters centered in their cells, and wrap and no-wrap edges both work. Within a step it currently **crossfades** from the previous configuration's still to the current one. M3 replaces that with clips.
 - [x] **M2: generated stills** (first cut). `tools/atlas/tiles.py` writes a 96 px 9×9 atlas, and it renders seamlessly in the dual renderer. Known blemishes: faint green flecks on some ground tiles, left from cells where the model drew something atypical. The art style is inherited from the photoreal-ish v0 keyframes.
-- [ ] **M3: generated clips** (in progress). The generator (`clips.py`) and renderer playback (`loadClips`, `transition()`/`clipFrame()` in `dualFrag`) are written. A one-world probe looks right: stable ground, grow and catch read well, and burnout is a bit smoky and mushy mid-clip. First full run: 14 worlds × ~2.5 min.
+- [x] **M3: generated clips** (first cut). `clips.py` makes 625 clips × 17 frames (14 worlds, about 2.5 min each); `loadClips` and `transition()`/`clipFrame()` in `dualFrag` play them over the step, and the stats line says "+ clips" when they've loaded. Checked in the browser: saplings grow, ignitions and burnouts play, and the tiles join. Known blemishes: burnout is smoky and mushy mid-clip, fire direction across edges isn't clearly legible, and the faint green fleck is still in the ground.
 - [ ] **M4: polish.** Texture compression, delete v0, and README/screenshots.
 
 ## Next steps
 
-1. Polish M2 if wanted: a cleaner style (better or regenerated keyframe sprites), a scorched look for EMPTY, try `--strength` 0.5–0.7 and other seeds, and suppress outlier flecks (e.g. median instead of medoid for the ground pieces).
-2. M3: finish the first full run (`HF_HUB_OFFLINE=1 .venv/bin/python clips.py all`; `gen` resumes per world from `work/clips3/raw_NN.npy`, and `pack` alone re-stitches). Check it in the browser, then tune the burnout sprite, the strength, and whether fire spreading across strips reads as directional.
-3. Output format (already read by `loadTiles`): `$TINDERBOX_DATA/atlas/tiles.json` `{"version": 1, "tile": N}` and `tiles.png`, a 9×9 grid of N-px tiles, row-major, where index = SW + 3·SE + 9·NW + 27·NE. Rows run top-down, so a tile's top edge is north.
+1. Judge M3 in motion at 3–5 s per step (`stepsPerSecond` about 0.25) and decide what to fix. Candidates: the burnout sprite (the v0 burn frames are mushy), fire direction across edges, and the clip length.
+2. Polish the stills and clips together, since the clips are pinned to the stills: the green fleck in the ground (a tuft in the `empty.png` keyframe that the model paints green; try inpainting the tuft out of the keyframe itself, not a new texture), the photoreal-ish style, and a scorched look for EMPTY. If the stills change, `python clips.py pack` re-pins the existing clips with no GPU; re-run `gen` only if the look changes.
+3. M4: texture compression for the 17 × 1800² pages, delete v0, README and screenshots.
+4. Format reference (read by `loadTiles`/`loadClips`): see *Atlas constraints*; stills are `tiles.json` `{"version": 1, "tile": N}` + `tiles.png`, a 9×9 grid with index = SW + 3·SE + 9·NW + 27·NE, rows top-down.
 
 ## Open questions
 
@@ -97,6 +99,8 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - **Max world size:** 1152² single-frame VACE fits the 3080; 1536² fails (`CUSOLVER_STATUS_INTERNAL_ERROR`, really OOM). A world pass takes about 100 s including model load.
 - **Wan's comfortable scale:** trees about 100–150 px across. At 64 px cells it draws mush.
 - **Video pass:** 768² × 17 frames fits in 10 GB only with `vae.enable_tiling()`, since the fp32 VAE encode runs out of memory otherwise. At about 3.6 s per step, a world takes about 2.5 min including load.
+- **Dev server:** `tinderbox-dev.service` (user unit, `tools/systemd/`) runs Vite from the main checkout on :5191. See CLAUDE.md.
+- **GPU queue:** the generators queue at priority 0, so a named consumer (xad-pod, 30) can hold the GPU for 15–20 minutes at a time. That's expected. Check with `curl -s localhost:8080/api/queue`.
 - **Background jobs:** launch with `setsid nohup … < /dev/null & disown`, or the job dies with the agent session. Don't detect them with `pgrep -f clips.py`, which matches the shell running pgrep itself. Use `ps -eo args | grep "[.]venv/bin/python clips.py"`.
 - **Python venv:** `tools/atlas/.venv` (gitignored). Recreate it with `pip install -r tools/atlas/requirements.txt`.
 
@@ -105,3 +109,4 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - **2026-10-08:** Built v0 end to end and generated a real atlas. The spread midpoint wipe reliably fixes fire direction. Keyframe lessons: the model ignites late in a burn clip, so pick the most-fire frame. The empty keyframe needs its own text-to-image pass. Loops with identical first and last frames come out nearly static. The user rejected v0 for its seams and rotation, which led to the v1 dual-grid design above.
 - **2026-10-08 (later):** M2. Tried hierarchical frozen inpainting, VACE layout control, blurry-layout SDEdit/ILVR and per-step latent sync; all failed (see *What didn't work*). What works is a sharp keyframe collage, an SDEdit harmonize pass and a pixel-space stitch with medoid leaders. Verified seamless in the browser.
 - **2026-10-08 (evening):** M3 started. A plain SDEdit video pass repaints the ground over the clip (smooth at frame 0, rocky by frame 16); VACE keep-frames at both ends, set to the still worlds, fix it.
+- **2026-10-08 (night):** M3 first cut: 625 clips, played back in the dual renderer. A clean-soil ground keyframe made the stills drift (see *What didn't work*), so the old ground stays. Stills now stitch with per-pixel-median leaders. The dev server became a systemd unit. bifrost rebooted mid-run once; jobs launched without `setsid` die with their session.
