@@ -4,3 +4,4 @@ dist/
 .DS_Store
 tools/atlas/.venv/
 .playwright-mcp/
+__pycache__/
