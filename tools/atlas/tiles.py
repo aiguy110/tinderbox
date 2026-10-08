@@ -189,15 +189,16 @@ def pieces(g: np.ndarray):
     ac = np.abs(np.arange(-rc, rc) + 0.5)
     corner_w = ramp(np.maximum(ac[:, None], ac[None, :]), B + F)
     out = []
-    for y in range(N):
-        for x in range(N):
+    n = len(g)
+    for y in range(n):
+        for x in range(n):
             cx, cy = ctr(x), ctr(y)
-            if x + 1 < N:
+            if x + 1 < n:
                 out.append((("h", g[y, x], g[y, x + 1]), (cy - r, cy + r, cx, cx + C), h_w))
-            if y + 1 < N:
+            if y + 1 < n:
                 out.append((("v", g[y + 1, x], g[y, x]), (cy, cy + C, cx - r, cx + r), v_w))
-    for y in range(N):
-        for x in range(N):
+    for y in range(n):
+        for x in range(n):
             cx, cy = ctr(x), ctr(y)
             out.append((("c", g[y, x]), (cy - rc, cy + rc, cx - rc, cx + rc), corner_w))
     return out
