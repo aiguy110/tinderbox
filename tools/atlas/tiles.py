@@ -204,6 +204,14 @@ def pieces(g: np.ndarray):
     return out
 
 
+def typical(stack: np.ndarray) -> int:
+    """Index of the occurrence closest to the per-pixel median. Stray flecks
+    land in a different place in each occurrence, so the median drops them;
+    the mean keeps a faint copy of each, and the medoid by mean still picked
+    a ground corner with a green streak in it, repeated over every tile."""
+    return int(np.abs(stack - np.median(stack, 0)).sum(tuple(range(1, stack.ndim))).argmin())
+
+
 def stitch(g: np.ndarray, im: Image.Image) -> Image.Image:
     src = np.asarray(im, np.float32)
     W = src.shape[0]
@@ -211,14 +219,10 @@ def stitch(g: np.ndarray, im: Image.Image) -> Image.Image:
     src = np.pad(src, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
     dst = src.copy()
     ps = [(key, (y0 + pad, y1 + pad, x0 + pad, x1 + pad), w) for key, (y0, y1, x0, x1), w in pieces(g)]
-    # Leader = the medoid occurrence (closest to the mean), not an outlier.
     crops = defaultdict(list)
     for key, (y0, y1, x0, x1), _ in ps:
         crops[key].append(src[y0:y1, x0:x1])
-    leaders = {}
-    for key, cs in crops.items():
-        stack = np.stack(cs)
-        leaders[key] = cs[int(((stack - stack.mean(0)) ** 2).sum((1, 2, 3)).argmin())]
+    leaders = {key: cs[typical(np.stack(cs))] for key, cs in crops.items()}
     for key, (y0, y1, x0, x1), w in ps:
         w = w[..., None]
         dst[y0:y1, x0:x1] = dst[y0:y1, x0:x1] * (1 - w) + leaders[key] * w
