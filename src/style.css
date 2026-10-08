@@ -1,0 +1,111 @@
+:root {
+  color-scheme: dark;
+  font: 13px/1.4 system-ui, sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+}
+
+#stage {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+#panel {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  width: 280px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgb(16 14 12 / 0.82);
+  backdrop-filter: blur(6px);
+  color: #e8e2da;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.5);
+  transition: opacity 0.2s, transform 0.2s;
+}
+
+#panel.hidden {
+  opacity: 0;
+  transform: translateX(16px);
+  pointer-events: none;
+}
+
+#panel header {
+  margin-bottom: 6px;
+}
+
+#panel h1 {
+  margin: 0;
+  font-size: 16px;
+  color: #ffb347;
+}
+
+.hint,
+.stats,
+.ratio {
+  font-size: 11px;
+  color: #9a928a;
+}
+
+.stats {
+  margin-bottom: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  margin-top: 6px;
+}
+
+.row output {
+  font-variant-numeric: tabular-nums;
+  color: #ffd08a;
+}
+
+.row input {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: #ff8c32;
+}
+
+.checks {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.checks input {
+  accent-color: #ff8c32;
+}
+
+.buttons {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.buttons button {
+  flex: 1;
+  padding: 5px 0;
+  border: 1px solid #4a423a;
+  border-radius: 6px;
+  background: #2a2420;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.buttons button:hover {
+  background: #3a3029;
+}

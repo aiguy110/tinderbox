@@ -1,0 +1,123 @@
+import { defaults, type Params } from './params';
+
+export interface ControlHandlers {
+  onChange(key: keyof Params): void;
+  onStep(): void;
+  onReseed(): void;
+  onFullscreen(): void;
+}
+
+export interface Controls {
+  /** Re-sync inputs after params were changed outside the panel. */
+  refresh(): void;
+  setStats(text: string): void;
+  toggleHidden(): void;
+}
+
+interface SliderSpec {
+  key: 'cellSize' | 'growth' | 'lightning' | 'stepsPerSecond' | 'initialDensity';
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  /** Slider position is log10(value). */
+  log?: boolean;
+  format(v: number): string;
+}
+
+const sliders: SliderSpec[] = [
+  { key: 'cellSize', label: 'Cell size', min: 1, max: 32, step: 1, format: (v) => `${v}px` },
+  { key: 'growth', label: 'Growth p', min: -5, max: 0, step: 0.05, log: true, format: sci },
+  { key: 'lightning', label: 'Lightning f', min: -8, max: -1, step: 0.05, log: true, format: sci },
+  { key: 'stepsPerSecond', label: 'Speed', min: 1, max: 480, step: 1, format: (v) => `${v} steps/s` },
+  { key: 'initialDensity', label: 'Seed density', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%` },
+];
+
+const toggles: { key: 'moore' | 'wrap' | 'gridLines' | 'paused'; label: string }[] = [
+  { key: 'paused', label: 'Paused' },
+  { key: 'moore', label: '8-neighbor spread' },
+  { key: 'wrap', label: 'Wrap edges' },
+  { key: 'gridLines', label: 'Grid lines' },
+];
+
+export function buildControls(root: HTMLElement, params: Params, h: ControlHandlers): Controls {
+  root.innerHTML = `
+    <header><h1>tinderbox</h1><span class="hint">H hides · F fullscreen · Space pause · click to ignite</span></header>
+    <div class="stats"></div>`;
+  const stats = root.querySelector<HTMLElement>('.stats')!;
+  const syncers: (() => void)[] = [];
+
+  for (const s of sliders) {
+    const row = document.createElement('label');
+    row.className = 'row';
+    row.innerHTML = `<span>${s.label}</span><output></output><input type="range" min="${s.min}" max="${s.max}" step="${s.step}">`;
+    const input = row.querySelector('input')!;
+    const out = row.querySelector('output')!;
+    const sync = () => {
+      input.value = String(s.log ? Math.log10(params[s.key]) : params[s.key]);
+      out.textContent = s.format(params[s.key]);
+    };
+    input.addEventListener('input', () => {
+      const raw = Number(input.value);
+      params[s.key] = s.log ? 10 ** raw : raw;
+      out.textContent = s.format(params[s.key]);
+      h.onChange(s.key);
+    });
+    syncers.push(sync);
+    root.appendChild(row);
+  }
+
+  const ratio = document.createElement('div');
+  ratio.className = 'ratio';
+  root.appendChild(ratio);
+  const syncRatio = () => (ratio.textContent = `p/f ≈ ${Math.round(params.growth / params.lightning).toLocaleString()}`);
+  syncers.push(syncRatio);
+  root.addEventListener('input', syncRatio);
+
+  const checks = document.createElement('div');
+  checks.className = 'checks';
+  for (const t of toggles) {
+    const row = document.createElement('label');
+    row.innerHTML = `<input type="checkbox"> ${t.label}`;
+    const input = row.querySelector('input')!;
+    syncers.push(() => (input.checked = params[t.key]));
+    input.addEventListener('change', () => {
+      params[t.key] = input.checked;
+      h.onChange(t.key);
+    });
+    checks.appendChild(row);
+  }
+  root.appendChild(checks);
+
+  const buttons = document.createElement('div');
+  buttons.className = 'buttons';
+  const button = (label: string, fn: () => void) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.addEventListener('click', fn);
+    buttons.appendChild(b);
+  };
+  button('Step', h.onStep);
+  button('Reseed', h.onReseed);
+  button('Defaults', () => {
+    const { paused } = params;
+    Object.assign(params, defaults, { paused });
+    refresh();
+    h.onChange('cellSize');
+  });
+  button('Fullscreen', h.onFullscreen);
+  root.appendChild(buttons);
+
+  const refresh = () => syncers.forEach((s) => s());
+  refresh();
+
+  return {
+    refresh,
+    setStats: (text) => (stats.textContent = text),
+    toggleHidden: () => root.classList.toggle('hidden'),
+  };
+}
+
+function sci(v: number): string {
+  return v >= 0.01 ? v.toPrecision(2) : v.toExponential(1);
+}
