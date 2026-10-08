@@ -33,14 +33,21 @@ Tiles are centered on grid **vertices**, not cells. A tile covers one quarter of
   - A clip's first frame is the still of the previous states and its last frame is the still of the current states, which gives time continuity.
   - Idle-only configs (every cell empty or tree) loop instead of playing once.
 
-### Generation: hierarchical, borders frozen
+### Generation: collage → harmonize → stitch (what works, `tools/atlas/tiles.py`)
 
-Each level is inpainted with the level below it frozen (VACE spatial masks; SD inpainting is a fallback). Borders therefore match exactly instead of approximately.
+1. **World layout.** A 12×12 non-wrapping grid in which every 2×2 configuration appears, found by annealing. It's rendered as a **sharp collage** of the v0 keyframes: ground texture, plus tree or burning-tree discs centered on cells.
+2. **Harmonize.** One Wan VACE pass, used as plain text-to-image with SDEdit. The latents are held on the noised collage's trajectory for the first 40% of 40 flow-matching Euler steps, then denoised freely. Since the collage is identical at every cell of a state, all occurrences of a border piece come out nearly identical.
+3. **Stitch** (pixel space). Border pieces are keyed by what they may depend on: a corner (one state) around each cell center, and h/v strips (a pair of states) along the lines between centers. The medoid occurrence of each key is pasted over all the others with feathered weights. Corners have full weight wherever the perpendicular strips overlap, so the tile-border lines are exact functions of their cells.
+4. **Crop.** Each configuration is taken from its most typical occurrence (lowest summed per-cell deviation from that state's mean) and written to the 9×9 atlas.
 
-1. **World/style pass.** Generate one image of a small toroidal world in which every 2×2 configuration appears, ideally a 9×9 de Bruijn torus over 3 states. Condition it on a rough layout render, either as a VACE control video or via img2img from the placeholder. This fixes the art style. Crop the corner patches from it.
-2. **Corners:** 3 patches for stills (6 for clips), one per cell state, each centered on a cell center.
-3. **Edges:** 9 vertical and 9 horizontal strips for stills (36 + 36 animated strips for clips). Each strip straddles a tile seam, and is inpainted with its two end corners frozen.
-4. **Tiles:** 81 stills or 1296 clips, with the interior inpainted and all four edge strips frozen. For clips, the first and last frames are also frozen to the matching stills.
+For clips (M3), the same idea extends to time: collage animated sprites, harmonize as video, stitch per frame, with first and last frames pinned to the stills.
+
+#### What didn't work (don't retry without a new idea)
+
+- **Hierarchical inpainting with frozen corners/strips** (VACE masks, re-pasted after each pass). The model treats the frozen lattice as content and paints a grid pattern; tile interiors ignore the configuration.
+- **VACE control from a color-blob layout.** It's bimodal: at conditioning scale 0.5 the layout is ignored; at 1.0 it's copied literally as flat blobs.
+- **SDEdit or ILVR (low-pass) guidance from a blurry layout.** The model keeps the blur: either blurry and on-layout, or sharp and off-layout.
+- **Synchronizing latents during denoising** (averaging, or copying a leader occurrence, after every step, with identical start noise). Both turn the image into a degenerate repeated pattern. With UniPC it's worse, because the corrector reuses its stored pre-callback sample. If you edit latents in a callback, use `FlowMatchEulerDiscreteScheduler(shift=3.0)`.
 
 ### Placeholder rule (also the rule generated tiles must obey)
 
@@ -57,14 +64,15 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - [x] v0 per-cell renderer, procedural placeholder, Wan VACE generator, turnstile lease client
 - [x] Binary assets moved outside the repo, plus a Vite plugin to serve them
 - [x] **M1: dual-grid renderer** (`dualFrag`, `loadTiles`/`placeholderTiles` in `src/atlas.ts`, plus a renderer select in the panel). It's checked in the browser: fire glow crosses tile borders seamlessly, canopies assemble from 4 quarters centered in their cells, and wrap and no-wrap edges both work. Within a step it currently **crossfades** from the previous configuration's still to the current one. M3 replaces that with clips.
-- [ ] **M2: generated stills.** World pass → corners → edges → 81 tiles, written as a v1 stills atlas. Success means no visible seams at 32–64 px cells.
+- [x] **M2: generated stills** (first cut). `tools/atlas/tiles.py` writes a 96 px 9×9 atlas, and it renders seamlessly in the dual renderer. Known blemishes: faint green flecks on some ground tiles, left from cells where the model drew something atypical. The art style is inherited from the photoreal-ish v0 keyframes.
 - [ ] **M3: generated clips.** Animated corners and edges → 1296 clips (batch several tiles per VACE run), paged atlas, transition playback over the step. Probably an overnight job on the 3080.
 - [ ] **M4: polish.** Texture compression, delete v0, and README/screenshots.
 
 ## Next steps
 
-1. M2: write `tools/atlas/tiles.py`, kept separate from the v0 `generate.py`. Start with the 9×9 de Bruijn torus search and the world pass, then inspect the world image before building corners and edges.
-2. Output format (already read by `loadTiles`): `$TINDERBOX_DATA/atlas/tiles.json` `{"version": 1, "tile": N}` and `tiles.png`, a 9×9 grid of N-px tiles, row-major, where index = SW + 3·SE + 9·NW + 27·NE. Rows run top-down, so a tile's top edge is north.
+1. Polish M2 if wanted: a cleaner style (better or regenerated keyframe sprites), a scorched look for EMPTY, try `--strength` 0.5–0.7 and other seeds, and suppress outlier flecks (e.g. median instead of medoid for the ground pieces).
+2. M3 clips: animated sprites per transition (grow, catch, burnout), collaged per frame, harmonized as video, stitched per frame. Decide the clip length and frame count against the atlas budget first (see Atlas constraints).
+3. Output format (already read by `loadTiles`): `$TINDERBOX_DATA/atlas/tiles.json` `{"version": 1, "tile": N}` and `tiles.png`, a 9×9 grid of N-px tiles, row-major, where index = SW + 3·SE + 9·NW + 27·NE. Rows run top-down, so a tile's top edge is north.
 
 ## Open questions
 
@@ -77,8 +85,11 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - **GPU:** RTX 3080, 10 GB, shared through turnstile (`tools/atlas/turnstile.py`). Without `TURNSTILE_API_KEY` the generator queues at priority 0.
 - **Text encoder:** UMT5-XXL is about 11 GB in bf16 and doesn't fit on the GPU. `generate.py` encodes prompts on the CPU (`embed()`) and loads the pipeline with `text_encoder=None`.
 - **IPv6** to Hugging Face times out on bifrost. Download weights once with IPv4 forced (patch `socket.getaddrinfo` to `AF_INET` and set `HF_HUB_DISABLE_XET=1`), then run with `HF_HUB_OFFLINE=1`. The weights (~23 GB) are already cached.
+- **Max world size:** 1152² single-frame VACE fits the 3080; 1536² fails (`CUSOLVER_STATUS_INTERNAL_ERROR`, really OOM). A world pass takes about 100 s including model load.
+- **Wan's comfortable scale:** trees about 100–150 px across. At 64 px cells it draws mush.
 - **Python venv:** `tools/atlas/.venv` (gitignored). Recreate it with `pip install -r tools/atlas/requirements.txt`.
 
 ## Log
 
 - **2026-10-08:** Built v0 end to end and generated a real atlas. The spread midpoint wipe reliably fixes fire direction. Keyframe lessons: the model ignites late in a burn clip, so pick the most-fire frame. The empty keyframe needs its own text-to-image pass. Loops with identical first and last frames come out nearly static. The user rejected v0 for its seams and rotation, which led to the v1 dual-grid design above.
+- **2026-10-08 (later):** M2. Tried hierarchical frozen inpainting, VACE layout control, blurry-layout SDEdit/ILVR and per-step latent sync; all failed (see *What didn't work*). What works is a sharp keyframe collage, an SDEdit harmonize pass and a pixel-space stitch with medoid leaders. Verified seamless in the browser.
