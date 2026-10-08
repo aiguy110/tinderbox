@@ -1,0 +1,10 @@
+torch>=2.4
+diffusers>=0.35
+transformers>=4.51
+accelerate
+ftfy
+sentencepiece
+imageio[ffmpeg]
+pillow
+numpy
+httpx

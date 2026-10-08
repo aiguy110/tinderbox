@@ -1,9 +1,12 @@
 import './style.css';
+import { loadAtlas } from './atlas';
 import { buildControls } from './controls';
 import { load, save } from './params';
 import { ForestFire } from './sim';
 
 const MAX_STEPS_PER_FRAME = 16;
+/** While paused, a manual step's transition clips play at most this fast. */
+const PAUSED_STEPS_PER_SECOND = 2;
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
 const panel = document.querySelector<HTMLElement>('#panel')!;
@@ -25,7 +28,7 @@ const controls = buildControls(panel, params, {
   onStep() {
     params.paused = true;
     controls.refresh();
-    sim.step(params);
+    stepOnce();
   },
   onReseed: () => sim.reseed(params.initialDensity),
   onFullscreen: toggleFullscreen,
@@ -35,6 +38,12 @@ function toggleFullscreen() {
   if (document.fullscreenElement) document.exitFullscreen();
   else document.documentElement.requestFullscreen();
 }
+
+let atlasSource = 'loading';
+loadAtlas().then((atlas) => {
+  sim.setAtlas(atlas);
+  atlasSource = atlas.source;
+});
 
 new ResizeObserver(() => sim.resize(params.cellSize, params.initialDensity)).observe(canvas);
 sim.resize(params.cellSize, params.initialDensity);
@@ -46,7 +55,7 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     params.paused = !params.paused;
     controls.refresh();
-  } else if (e.key === '.') sim.step(params);
+  } else if (e.key === '.') stepOnce();
 });
 
 // Click or drag on the canvas to ignite cells.
@@ -64,9 +73,16 @@ canvas.addEventListener('pointermove', (e) => igniting && igniteAt(e));
 canvas.addEventListener('pointerup', () => (igniting = false));
 
 let last = performance.now();
+// Fractional steps owed. After stepping, it's also how far we are through the
+// current step, which is what transition clips are timed by.
 let debt = 0;
 let fps = 0;
 let statsAt = 0;
+
+function stepOnce() {
+  sim.step(params);
+  debt = 0;
+}
 
 function frame(now: number) {
   const dt = Math.min(0.25, (now - last) / 1000);
@@ -78,13 +94,15 @@ function frame(now: number) {
     const n = Math.min(MAX_STEPS_PER_FRAME, Math.floor(debt));
     for (let i = 0; i < n; i++) sim.step(params);
     debt = n === MAX_STEPS_PER_FRAME ? 0 : debt - n;
+  } else {
+    debt = Math.min(1, debt + dt * Math.min(params.stepsPerSecond, PAUSED_STEPS_PER_SECOND));
   }
-  sim.render(params.gridLines);
+  sim.render({ gridLines: params.gridLines, sprites: params.sprites, progress: debt, time: now / 1000 });
 
   if (now - statsAt > 250) {
     statsAt = now;
     controls.setStats(
-      `${sim.width}×${sim.height} cells · gen ${sim.generation.toLocaleString()} · ${fps.toFixed(0)} fps`,
+      `${sim.width}×${sim.height} cells · gen ${sim.generation.toLocaleString()} · ${fps.toFixed(0)} fps · ${atlasSource} atlas`,
     );
   }
   requestAnimationFrame(frame);

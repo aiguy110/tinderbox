@@ -29,15 +29,16 @@ const sliders: SliderSpec[] = [
   { key: 'cellSize', label: 'Cell size', min: 1, max: 32, step: 1, format: (v) => `${v}px` },
   { key: 'growth', label: 'Growth p', min: -5, max: 0, step: 0.05, log: true, format: sci },
   { key: 'lightning', label: 'Lightning f', min: -8, max: -1, step: 0.05, log: true, format: sci },
-  { key: 'stepsPerSecond', label: 'Speed', min: 1, max: 480, step: 1, format: (v) => `${v} steps/s` },
+  { key: 'stepsPerSecond', label: 'Speed', min: -1, max: Math.log10(480), step: 0.01, log: true, format: speed },
   { key: 'initialDensity', label: 'Seed density', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%` },
 ];
 
-const toggles: { key: 'moore' | 'wrap' | 'gridLines' | 'paused'; label: string }[] = [
+const toggles: { key: 'moore' | 'wrap' | 'gridLines' | 'sprites' | 'paused'; label: string }[] = [
   { key: 'paused', label: 'Paused' },
   { key: 'moore', label: '8-neighbor spread' },
   { key: 'wrap', label: 'Wrap edges' },
   { key: 'gridLines', label: 'Grid lines' },
+  { key: 'sprites', label: 'Sprites' },
 ];
 
 export function buildControls(root: HTMLElement, params: Params, h: ControlHandlers): Controls {
@@ -138,6 +139,10 @@ export function buildControls(root: HTMLElement, params: Params, h: ControlHandl
     setStats: (text) => (stats.textContent = text),
     toggleHidden: () => setHidden(!params.panelHidden),
   };
+}
+
+function speed(v: number): string {
+  return v >= 1 ? `${Math.round(v)} steps/s` : `${(1 / v).toFixed(1)} s/step`;
 }
 
 function sci(v: number): string {

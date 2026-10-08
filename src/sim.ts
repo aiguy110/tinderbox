@@ -1,4 +1,15 @@
-import { Cause, State, fullscreenVert, renderFrag, stepFrag } from './shaders';
+import { type Atlas, uploadAtlas } from './atlas';
+import { Cause, State, flatFrag, fullscreenVert, spriteFrag, stepFrag } from './shaders';
+
+export interface RenderOptions {
+  gridLines: boolean;
+  /** Use the sprite atlas, if one is loaded. */
+  sprites: boolean;
+  /** How far through the current step, 0 to 1. Drives transition clips. */
+  progress: number;
+  /** Seconds. Drives looping idle clips. */
+  time: number;
+}
 
 export interface StepParams {
   growth: number;
@@ -25,9 +36,12 @@ export class ForestFire {
   private buffers: [Buffer, Buffer] | null = null;
   private current = 0;
   private stepProg: WebGLProgram;
-  private renderProg: WebGLProgram;
+  private flatProg: WebGLProgram;
+  private spriteProg: WebGLProgram;
   private stepU: Uniforms;
-  private renderU: Uniforms;
+  private flatU: Uniforms;
+  private spriteU: Uniforms;
+  private atlas: { tex: WebGLTexture; data: Atlas } | null = null;
   private vao: WebGLVertexArrayObject;
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -35,9 +49,13 @@ export class ForestFire {
     if (!gl) throw new Error('WebGL2 is not supported in this browser');
     this.gl = gl;
     this.stepProg = link(gl, fullscreenVert, stepFrag);
-    this.renderProg = link(gl, fullscreenVert, renderFrag);
+    this.flatProg = link(gl, fullscreenVert, flatFrag);
+    this.spriteProg = link(gl, fullscreenVert, spriteFrag);
     this.stepU = uniforms(gl, this.stepProg, ['uState', 'uSeed', 'uGrowth', 'uLightning', 'uMoore', 'uWrap']);
-    this.renderU = uniforms(gl, this.renderProg, ['uState', 'uCellPx', 'uGridLines']);
+    this.flatU = uniforms(gl, this.flatProg, ['uState', 'uCellPx', 'uGridLines']);
+    this.spriteU = uniforms(gl, this.spriteProg, [
+      'uState', 'uAtlas', 'uCellPx', 'uGridLines', 'uProgress', 'uTime', 'uClipFrames', 'uClipSeconds',
+    ]);
     this.vao = gl.createVertexArray()!;
   }
 
@@ -111,17 +129,34 @@ export class ForestFire {
     this.generation++;
   }
 
-  render(gridLines: boolean) {
+  setAtlas(data: Atlas) {
+    if (this.atlas) this.gl.deleteTexture(this.atlas.tex);
+    this.atlas = { tex: uploadAtlas(this.gl, data), data };
+  }
+
+  render(o: RenderOptions) {
     if (!this.buffers) return;
     const gl = this.gl;
+    const sprites = o.sprites && this.atlas;
+    const u = sprites ? this.spriteU : this.flatU;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.useProgram(this.renderProg);
+    gl.useProgram(sprites ? this.spriteProg : this.flatProg);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.buffers[this.current].tex);
-    gl.uniform1i(this.renderU.uState, 0);
-    gl.uniform1f(this.renderU.uCellPx, this.cellPx);
-    gl.uniform1i(this.renderU.uGridLines, gridLines && this.cellPx >= 6 ? 1 : 0);
+    gl.uniform1i(u.uState, 0);
+    gl.uniform1f(u.uCellPx, this.cellPx);
+    gl.uniform1i(u.uGridLines, o.gridLines && this.cellPx >= 6 ? 1 : 0);
+    if (sprites) {
+      const { tex, data } = sprites;
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+      gl.uniform1i(u.uAtlas, 1);
+      gl.uniform1f(u.uProgress, o.progress);
+      gl.uniform1f(u.uTime, o.time);
+      gl.uniform2iv(u.uClipFrames, data.clips.flatMap((c) => [c.first, c.frames]));
+      gl.uniform1fv(u.uClipSeconds, data.clips.map((c) => c.seconds));
+    }
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }

@@ -14,6 +14,8 @@ export interface Params {
   /** Toroidal edges. */
   wrap: boolean;
   gridLines: boolean;
+  /** Animated sprites instead of flat colors. */
+  sprites: boolean;
   paused: boolean;
   panelHidden: boolean;
 }
@@ -27,6 +29,7 @@ export const defaults: Params = {
   moore: false,
   wrap: true,
   gridLines: true,
+  sprites: true,
   paused: false,
   panelHidden: false,
 };
