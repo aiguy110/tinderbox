@@ -254,13 +254,19 @@ void main() {
 // Dual-grid renderer (docs/PLAN.md). Tiles sit on grid vertices and each
 // covers a quarter of the 4 cells around it, so a tile is chosen purely by
 // those 4 states and borders between tiles depend only on the cells they
-// pass through. For now tiles are stills keyed on the step-boundary states;
-// within a step we crossfade from the previous configuration to the current.
+// pass through. Within a step each tile plays the clip for its 4 cells'
+// transitions, which starts and ends on the stills of the step-boundary
+// states. Until the clips have loaded it crossfades between those stills.
 export const dualFrag = /* glsl */ `${common}
 precision highp sampler2DArray;
 
 uniform usampler2D uState;
 uniform sampler2DArray uTiles;
+uniform sampler2DArray uClips;
+uniform bool uHasClips;
+// Clip pages: (columns, tile px, gutter px, frames), and page side in px.
+uniform ivec4 uClipLayout;
+uniform float uPageSize;
 uniform float uCellPx;
 uniform bool uGridLines;
 uniform bool uWrap;
@@ -277,6 +283,23 @@ uvec2 cellAt(ivec2 c) {
     return uvec2(EMPTY);
   }
   return texelFetch(uState, c, 0).rg; // (current, previous)
+}
+
+// The cell's transition over the step, in tools/atlas/clips.py order:
+// empty, tree, grow, catch, burnout.
+uint transition(uvec2 s) {
+  if (s.x == EMPTY) return s.y == FIRE ? 4u : 0u;
+  if (s.x == TREE) return s.y == EMPTY ? 2u : 1u;
+  return 3u;
+}
+
+vec3 clipFrame(uint clip, int frame, vec2 st, vec2 gx, vec2 gy) {
+  int cols = uClipLayout.x;
+  float tile = float(uClipLayout.y);
+  float slot = tile + 2.0 * float(uClipLayout.z);
+  vec2 origin = vec2(float(int(clip) % cols), float(int(clip) / cols)) * slot + float(uClipLayout.z);
+  float k = tile / uPageSize;
+  return textureGrad(uClips, vec3((origin + st * tile) / uPageSize, float(frame)), gx * k, gy * k).rgb;
 }
 
 void main() {
@@ -296,9 +319,19 @@ void main() {
   vec2 st = vec2(uv.x, 1.0 - uv.y);
   vec2 gx = dFdx(p) * vec2(1.0, -1.0);
   vec2 gy = dFdy(p) * vec2(1.0, -1.0);
-  vec3 cur = textureGrad(uTiles, vec3(st, float(config.x)), gx, gy).rgb;
-  vec3 prev = textureGrad(uTiles, vec3(st, float(config.y)), gx, gy).rgb;
-  vec3 c = mix(prev, cur, smoothstep(0.0, 1.0, clamp(uProgress, 0.0, 1.0)));
+  float t = clamp(uProgress, 0.0, 1.0);
+  vec3 c;
+  if (uHasClips) {
+    uint clip = transition(sw) + 5u * transition(se) + 25u * transition(nw) + 125u * transition(ne);
+    float pos = t * float(uClipLayout.w - 1);
+    int f0 = int(pos);
+    int f1 = min(f0 + 1, uClipLayout.w - 1);
+    c = mix(clipFrame(clip, f0, st, gx, gy), clipFrame(clip, f1, st, gx, gy), fract(pos));
+  } else {
+    vec3 cur = textureGrad(uTiles, vec3(st, float(config.x)), gx, gy).rgb;
+    vec3 prev = textureGrad(uTiles, vec3(st, float(config.y)), gx, gy).rgb;
+    c = mix(prev, cur, smoothstep(0.0, 1.0, t));
+  }
 
   if (uGridLines) {
     vec2 g = fract(p);

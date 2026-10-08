@@ -203,6 +203,7 @@ def harmonize_video(frames: list[Image.Image], seed: int, strength: float) -> np
             self.sigmas = self.sigmas[self.start:]
 
     p = pipe()
+    p.vae.enable_tiling()  # the fp32 VAE runs out of memory on a whole 768^2 clip
     sched = Truncated(shift=3.0)
     # Same start as tiles.harmonize: its last forced step lands on sigma[lock - 1].
     sched.start = max(0, round((1 - strength) * STEPS) - 1)

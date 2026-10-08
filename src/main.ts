@@ -1,5 +1,5 @@
 import './style.css';
-import { loadAtlas, loadTiles } from './atlas';
+import { loadAtlas, loadClips, loadTiles } from './atlas';
 import { buildControls } from './controls';
 import { load, save } from './params';
 import { ForestFire } from './sim';
@@ -40,6 +40,7 @@ function toggleFullscreen() {
 }
 
 const atlasSource = { cells: 'loading', dual: 'loading' };
+let atlasClips = false;
 loadAtlas().then((atlas) => {
   sim.setAtlas(atlas);
   atlasSource.cells = atlas.source;
@@ -47,6 +48,10 @@ loadAtlas().then((atlas) => {
 loadTiles().then((tiles) => {
   sim.setTiles(tiles);
   atlasSource.dual = tiles.source;
+});
+loadClips().then((clips) => {
+  if (clips) sim.setClips(clips);
+  atlasClips = !!clips;
 });
 
 new ResizeObserver(() => sim.resize(params.cellSize, params.initialDensity)).observe(canvas);
@@ -106,7 +111,7 @@ function frame(now: number) {
   if (now - statsAt > 250) {
     statsAt = now;
     controls.setStats(
-      `${sim.width}×${sim.height} cells · gen ${sim.generation.toLocaleString()} · ${fps.toFixed(0)} fps${params.renderer === 'flat' ? '' : ` · ${atlasSource[params.renderer]} atlas`}`,
+      `${sim.width}×${sim.height} cells · gen ${sim.generation.toLocaleString()} · ${fps.toFixed(0)} fps${params.renderer === 'flat' ? '' : ` · ${atlasSource[params.renderer]} atlas${params.renderer === 'dual' && atlasClips ? ' + clips' : ''}`}`,
     );
   }
   requestAnimationFrame(frame);

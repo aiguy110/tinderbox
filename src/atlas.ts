@@ -412,3 +412,55 @@ function tileFlames(g: OffscreenCanvasRenderingContext2D, cx: number, cy: number
   }
   g.globalCompositeOperation = 'source-over';
 }
+
+// --- Dual-grid clips ----------------------------------------------------------
+//
+// `atlas/clips.json` + `clips-NN.png` (tools/atlas/clips.py): one page per
+// frame, each a `columns`-wide grid of the 625 vertex clips, where a cell's
+// transition over the step is one of `transitions` and
+// index = SW + 5·SE + 25·NW + 125·NE. Each tile is padded by `gutter` px of
+// its own edge pixels so filtering never reads a neighbor on the page.
+
+export interface ClipsManifest {
+  version: 1;
+  tile: number;
+  gutter: number;
+  frames: number;
+  columns: number;
+  transitions: string[];
+}
+
+export interface ClipPages {
+  /** Page side in px. */
+  size: number;
+  layers: number;
+  pixels: Uint8Array;
+  manifest: ClipsManifest;
+}
+
+export async function loadClips(): Promise<ClipPages | null> {
+  const base = `${import.meta.env.BASE_URL}atlas/`;
+  try {
+    const res = await fetch(`${base}clips.json`);
+    if (!res.ok) return null;
+    const manifest: ClipsManifest = await res.json();
+    const pages = await Promise.all(
+      Array.from({ length: manifest.frames }, async (_, f) => {
+        const img = new Image();
+        img.src = `${base}clips-${String(f).padStart(2, '0')}.png`;
+        await img.decode();
+        return img;
+      }),
+    );
+    const size = pages[0].width;
+    const ctx = new OffscreenCanvas(size, size).getContext('2d', { willReadFrequently: true })!;
+    const pixels = new Uint8Array(manifest.frames * size * size * 4);
+    pages.forEach((img, f) => {
+      ctx.drawImage(img, 0, 0);
+      pixels.set(ctx.getImageData(0, 0, size, size).data, f * size * size * 4);
+    });
+    return { size, layers: manifest.frames, pixels, manifest };
+  } catch {
+    return null;
+  }
+}

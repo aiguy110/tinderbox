@@ -1,4 +1,4 @@
-import { type Atlas, type TileAtlas, uploadAtlas } from './atlas';
+import { type Atlas, type ClipPages, type ClipsManifest, type TileAtlas, uploadAtlas } from './atlas';
 import { Cause, State, dualFrag, flatFrag, fullscreenVert, spriteFrag, stepFrag } from './shaders';
 
 export type Renderer = 'flat' | 'cells' | 'dual';
@@ -48,6 +48,7 @@ export class ForestFire {
   private dualU: Uniforms;
   private atlas: { tex: WebGLTexture; data: Atlas } | null = null;
   private tiles: WebGLTexture | null = null;
+  private clips: { tex: WebGLTexture; size: number; manifest: ClipsManifest } | null = null;
   private vao: WebGLVertexArrayObject;
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -63,7 +64,9 @@ export class ForestFire {
     this.spriteU = uniforms(gl, this.spriteProg, [
       'uState', 'uAtlas', 'uCellPx', 'uGridLines', 'uProgress', 'uTime', 'uClipFrames', 'uClipSeconds',
     ]);
-    this.dualU = uniforms(gl, this.dualProg, ['uState', 'uTiles', 'uCellPx', 'uGridLines', 'uWrap', 'uProgress']);
+    this.dualU = uniforms(gl, this.dualProg, [
+      'uState', 'uTiles', 'uClips', 'uHasClips', 'uClipLayout', 'uPageSize', 'uCellPx', 'uGridLines', 'uWrap', 'uProgress',
+    ]);
     this.vao = gl.createVertexArray()!;
   }
 
@@ -147,6 +150,16 @@ export class ForestFire {
     this.tiles = uploadAtlas(this.gl, data);
   }
 
+  setClips(data: ClipPages) {
+    const gl = this.gl;
+    if (this.clips) gl.deleteTexture(this.clips.tex);
+    const tex = uploadAtlas(gl, { tile: data.size, layers: data.layers, pixels: data.pixels });
+    // Tiles sit side by side on a page; past this mip level their gutters
+    // are under a texel wide and neighbors would bleed in.
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAX_LOD, Math.max(0, Math.floor(Math.log2(data.manifest.gutter))));
+    this.clips = { tex, size: data.size, manifest: data.manifest };
+  }
+
   render(o: RenderOptions) {
     if (!this.buffers) return;
     const gl = this.gl;
@@ -177,6 +190,15 @@ export class ForestFire {
       gl.uniform1i(u.uTiles, 1);
       gl.uniform1i(u.uWrap, o.wrap ? 1 : 0);
       gl.uniform1f(u.uProgress, o.progress);
+      gl.uniform1i(u.uHasClips, this.clips ? 1 : 0);
+      if (this.clips) {
+        const { manifest: m } = this.clips;
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.clips.tex);
+        gl.uniform1i(u.uClips, 2);
+        gl.uniform4i(u.uClipLayout, m.columns, m.tile, m.gutter, m.frames);
+        gl.uniform1f(u.uPageSize, this.clips.size);
+      }
     }
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
