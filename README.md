@@ -19,12 +19,12 @@ npm run dev
 
 **Controls:** use the panel to set cell size, p, f, speed, seed density, neighborhood, and edge wrap. Keys:
 
-- `H` hides the panel
+- `H` or the × / ☰ buttons hide and show the panel
 - `F` toggles fullscreen
 - `Space` pauses
 - `.` steps once
 
-Click or drag on the canvas to start fires. Settings are saved in localStorage.
+Click or drag on the canvas to start fires. Settings, including whether the panel is hidden, are saved in localStorage.
 
 ## Layout
 

@@ -42,9 +42,31 @@ const toggles: { key: 'moore' | 'wrap' | 'gridLines' | 'paused'; label: string }
 
 export function buildControls(root: HTMLElement, params: Params, h: ControlHandlers): Controls {
   root.innerHTML = `
-    <header><h1>tinderbox</h1><span class="hint">H hides · F fullscreen · Space pause · click to ignite</span></header>
+    <header>
+      <h1>tinderbox</h1>
+      <button class="hide" title="Hide panel (H)" aria-label="Hide panel">×</button>
+      <span class="hint">H hides · F fullscreen · Space pause · click to ignite</span>
+    </header>
     <div class="stats"></div>`;
   const stats = root.querySelector<HTMLElement>('.stats')!;
+
+  const show = document.createElement('button');
+  show.className = 'show-panel';
+  show.title = 'Show panel (H)';
+  show.setAttribute('aria-label', 'Show panel');
+  show.textContent = '☰';
+  root.after(show);
+
+  const setHidden = (hidden: boolean) => {
+    params.panelHidden = hidden;
+    root.classList.toggle('hidden', hidden);
+    show.classList.toggle('visible', hidden);
+    h.onChange('panelHidden');
+  };
+  root.querySelector('.hide')!.addEventListener('click', () => setHidden(true));
+  show.addEventListener('click', () => setHidden(false));
+  root.classList.toggle('hidden', params.panelHidden);
+  show.classList.toggle('visible', params.panelHidden);
   const syncers: (() => void)[] = [];
 
   for (const s of sliders) {
@@ -100,8 +122,8 @@ export function buildControls(root: HTMLElement, params: Params, h: ControlHandl
   button('Step', h.onStep);
   button('Reseed', h.onReseed);
   button('Defaults', () => {
-    const { paused } = params;
-    Object.assign(params, defaults, { paused });
+    const { paused, panelHidden } = params;
+    Object.assign(params, defaults, { paused, panelHidden });
     refresh();
     h.onChange('cellSize');
   });
@@ -114,7 +136,7 @@ export function buildControls(root: HTMLElement, params: Params, h: ControlHandl
   return {
     refresh,
     setStats: (text) => (stats.textContent = text),
-    toggleHidden: () => root.classList.toggle('hidden'),
+    toggleHidden: () => setHidden(!params.panelHidden),
   };
 }
 

@@ -40,7 +40,54 @@ body {
 }
 
 #panel header {
+  position: relative;
   margin-bottom: 6px;
+  padding-right: 24px;
+}
+
+#panel .hide {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+}
+
+#panel .hide,
+.show-panel {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid #4a423a;
+  border-radius: 6px;
+  background: #2a2420;
+  color: #e8e2da;
+  font: 16px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+#panel .hide:hover,
+.show-panel:hover {
+  background: #3a3029;
+}
+
+.show-panel {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  width: 34px;
+  height: 34px;
+  background: rgb(16 14 12 / 0.6);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+
+.show-panel.visible {
+  opacity: 0.5;
+  pointer-events: auto;
+}
+
+.show-panel.visible:hover {
+  opacity: 1;
 }
 
 #panel h1 {

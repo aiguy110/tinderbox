@@ -15,6 +15,7 @@ export interface Params {
   wrap: boolean;
   gridLines: boolean;
   paused: boolean;
+  panelHidden: boolean;
 }
 
 export const defaults: Params = {
@@ -27,6 +28,7 @@ export const defaults: Params = {
   wrap: true,
   gridLines: true,
   paused: false,
+  panelHidden: false,
 };
 
 const KEY = 'tinderbox:params';
