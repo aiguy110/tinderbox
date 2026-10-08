@@ -29,9 +29,10 @@ Tiles are centered on grid **vertices**, not cells. A tile covers one quarter of
 ### Vocabulary
 
 - **Stills (step boundaries):** each cell is one of {EMPTY, TREE, FIRE}, so K=3 and there are 3⁴ = **81 stills**.
-- **Clips (during a step):** each cell is one of {empty, tree, grow, catch-spread, catch-lightning, burnout}, so K=6 and there are 6⁴ = **1296 clips**.
+- **Clips (during a step):** each cell plays one of {empty, tree, grow, catch, burnout}, so K=5 and there are 5⁴ = **625 clips**.
+  - Spread and lightning are both "catch". A cell's own corner piece is shared by all 4 tiles around it, so it can't depend on where the fire came from anyway; direction can only show in strips and tile interiors. Splitting them would mean 1296 clips for a lightning flash.
   - A clip's first frame is the still of the previous states and its last frame is the still of the current states, which gives time continuity.
-  - Idle-only configs (every cell empty or tree) loop instead of playing once.
+  - Every clip, idle ones included, plays once over the step (`progress` 0→1). Idle-only tiles start and end on the same still, so they don't pop.
 
 ### Generation: collage → harmonize → stitch (what works, `tools/atlas/tiles.py`)
 
@@ -40,7 +41,14 @@ Tiles are centered on grid **vertices**, not cells. A tile covers one quarter of
 3. **Stitch** (pixel space). Border pieces are keyed by what they may depend on: a corner (one state) around each cell center, and h/v strips (a pair of states) along the lines between centers. The medoid occurrence of each key is pasted over all the others with feathered weights. Corners have full weight wherever the perpendicular strips overlap, so the tile-border lines are exact functions of their cells.
 4. **Crop.** Each configuration is taken from its most typical occurrence (lowest summed per-cell deviation from that state's mean) and written to the 9×9 atlas.
 
-For clips (M3), the same idea extends to time: collage animated sprites, harmonize as video, stitch per frame, with first and last frames pinned to the stills.
+### Clips: the same, in time (`tools/atlas/clips.py`)
+
+1. **Worlds.** 14 non-wrapping 8×8 transition grids (768², one video pass each) that together contain all 625 configurations, found by greedy annealing.
+2. **Animated collage**, 17 frames: a sapling scaling up (the v0 grow clip pops in one frame), the v0 ignition clip, and flames from the v0 burnout clip fading out into ground. Each sprite's ends match the still collage exactly.
+3. **Harmonize** as one 17-frame Wan VACE video pass per world, SDEdit at strength 0.6. The schedule is truncated to start at the strength's step, which skips the discarded steps. **Frames 0 and 16 are given to VACE as keep-frames (conditioning scale 1), set to the M2 still worlds of the previous and current states** (assembled from atlas tiles). Without them the model slowly repaints the ground over the clip, so the middle of every clip would have different ground than its ends.
+4. **Stitch** as for stills, but over all worlds at once. One leader per key, the medoid over every occurrence with all frames taken together, is pasted into every frame.
+5. **Pin** the first and last 4 frames into the exact still worlds with a linear ramp, so clips start and end on M2 tiles to the pixel.
+6. **Pack:** each config is cropped from its most typical occurrence and downscaled to 64 px.
 
 #### What didn't work (don't retry without a new idea)
 
@@ -55,8 +63,9 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 
 ### Atlas constraints
 
-- WebGL2 only guarantees 256 texture-array layers; typical hardware allows 2048. 81 stills fit as layers. 1296 clips × 16 frames does not, so clips will need **pages**: each layer becomes a grid of tiles, with gutters and clamped LOD.
-- 1296 × 16 frames × 64² × 4 B ≈ 340 MB uncompressed. Plan on KTX2/Basis compression, fewer frames, or smaller tiles.
+- WebGL2 only guarantees 256 texture-array layers; typical hardware allows 2048. 81 stills fit as layers. 625 clips × 17 frames do not, so clips use **pages**: `clips-NN.png` holds frame NN of every clip, as a 25×25 grid of 64 px tiles, each padded by a 4 px edge-extended gutter (1800² px). The texture array has one layer per frame, and `TEXTURE_MAX_LOD` is clamped to 2 so mips never mix neighbors on a page.
+- That's 17 × 1800² × 4 B ≈ 220 MB uncompressed (≈290 MB with mips). Texture compression (KTX2/Basis) or fewer frames is M4.
+- `clips.json`: `{"version":1,"tile":64,"gutter":4,"frames":17,"columns":25,"transitions":[...]}`. Clip index = SW + 5·SE + 25·NW + 125·NE over transitions in that order. The renderer maps (current, previous) state to a transition in `transition()` in `dualFrag`.
 - Binary assets live outside the repo in `$TINDERBOX_DATA` (default `~/.local/share/tinderbox`). `vite.config.ts` serves `$TINDERBOX_DATA/atlas/` at `/atlas/`.
 
 ## Milestones
@@ -65,13 +74,13 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - [x] Binary assets moved outside the repo, plus a Vite plugin to serve them
 - [x] **M1: dual-grid renderer** (`dualFrag`, `loadTiles`/`placeholderTiles` in `src/atlas.ts`, plus a renderer select in the panel). It's checked in the browser: fire glow crosses tile borders seamlessly, canopies assemble from 4 quarters centered in their cells, and wrap and no-wrap edges both work. Within a step it currently **crossfades** from the previous configuration's still to the current one. M3 replaces that with clips.
 - [x] **M2: generated stills** (first cut). `tools/atlas/tiles.py` writes a 96 px 9×9 atlas, and it renders seamlessly in the dual renderer. Known blemishes: faint green flecks on some ground tiles, left from cells where the model drew something atypical. The art style is inherited from the photoreal-ish v0 keyframes.
-- [ ] **M3: generated clips.** Animated corners and edges → 1296 clips (batch several tiles per VACE run), paged atlas, transition playback over the step. Probably an overnight job on the 3080.
+- [ ] **M3: generated clips** (in progress). The generator (`clips.py`) and renderer playback (`loadClips`, `transition()`/`clipFrame()` in `dualFrag`) are written. A one-world probe looks right: stable ground, grow and catch read well, and burnout is a bit smoky and mushy mid-clip. First full run: 14 worlds × ~2.5 min.
 - [ ] **M4: polish.** Texture compression, delete v0, and README/screenshots.
 
 ## Next steps
 
 1. Polish M2 if wanted: a cleaner style (better or regenerated keyframe sprites), a scorched look for EMPTY, try `--strength` 0.5–0.7 and other seeds, and suppress outlier flecks (e.g. median instead of medoid for the ground pieces).
-2. M3 clips: animated sprites per transition (grow, catch, burnout), collaged per frame, harmonized as video, stitched per frame. Decide the clip length and frame count against the atlas budget first (see Atlas constraints).
+2. M3: finish the first full run (`HF_HUB_OFFLINE=1 .venv/bin/python clips.py all`; `gen` resumes per world from `work/clips3/raw_NN.npy`, and `pack` alone re-stitches). Check it in the browser, then tune the burnout sprite, the strength, and whether fire spreading across strips reads as directional.
 3. Output format (already read by `loadTiles`): `$TINDERBOX_DATA/atlas/tiles.json` `{"version": 1, "tile": N}` and `tiles.png`, a 9×9 grid of N-px tiles, row-major, where index = SW + 3·SE + 9·NW + 27·NE. Rows run top-down, so a tile's top edge is north.
 
 ## Open questions
@@ -87,9 +96,12 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - **IPv6** to Hugging Face times out on bifrost. Download weights once with IPv4 forced (patch `socket.getaddrinfo` to `AF_INET` and set `HF_HUB_DISABLE_XET=1`), then run with `HF_HUB_OFFLINE=1`. The weights (~23 GB) are already cached.
 - **Max world size:** 1152² single-frame VACE fits the 3080; 1536² fails (`CUSOLVER_STATUS_INTERNAL_ERROR`, really OOM). A world pass takes about 100 s including model load.
 - **Wan's comfortable scale:** trees about 100–150 px across. At 64 px cells it draws mush.
+- **Video pass:** 768² × 17 frames fits in 10 GB only with `vae.enable_tiling()`, since the fp32 VAE encode runs out of memory otherwise. At about 3.6 s per step, a world takes about 2.5 min including load.
+- **Background jobs:** launch with `setsid nohup … < /dev/null & disown`, or the job dies with the agent session. Don't detect them with `pgrep -f clips.py`, which matches the shell running pgrep itself. Use `ps -eo args | grep "[.]venv/bin/python clips.py"`.
 - **Python venv:** `tools/atlas/.venv` (gitignored). Recreate it with `pip install -r tools/atlas/requirements.txt`.
 
 ## Log
 
 - **2026-10-08:** Built v0 end to end and generated a real atlas. The spread midpoint wipe reliably fixes fire direction. Keyframe lessons: the model ignites late in a burn clip, so pick the most-fire frame. The empty keyframe needs its own text-to-image pass. Loops with identical first and last frames come out nearly static. The user rejected v0 for its seams and rotation, which led to the v1 dual-grid design above.
 - **2026-10-08 (later):** M2. Tried hierarchical frozen inpainting, VACE layout control, blurry-layout SDEdit/ILVR and per-step latent sync; all failed (see *What didn't work*). What works is a sharp keyframe collage, an SDEdit harmonize pass and a pixel-space stitch with medoid leaders. Verified seamless in the browser.
+- **2026-10-08 (evening):** M3 started. A plain SDEdit video pass repaints the ground over the clip (smooth at frame 0, rocky by frame 16); VACE keep-frames at both ends, set to the still worlds, fix it.
