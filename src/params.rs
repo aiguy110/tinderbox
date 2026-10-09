@@ -61,6 +61,14 @@ pub struct Params {
     pub trees: f32,
     /// Scene renderer: moonlight instead of daylight.
     pub night: bool,
+    /// A meandering river across the grid (see river.rs).
+    pub river: bool,
+    /// Its width in logical pixels (at least 2 cells).
+    pub river_width: f32,
+    /// How fast it meanders, relative to the default.
+    pub meander: f32,
+    /// Chance per step that a tree on the bank catches from fire across the river.
+    pub spotting: f32,
     #[serde(skip_serializing)]
     pub paused: bool,
     pub panel_hidden: bool,
@@ -83,6 +91,10 @@ impl Default for Params {
             renderer: Renderer::Scene,
             trees: 4.0,
             night: false,
+            river: true,
+            river_width: 20.0,
+            meander: 1.0,
+            spotting: 0.002,
             paused: false,
             panel_hidden: false,
         }

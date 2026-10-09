@@ -28,7 +28,9 @@ pub struct ViewUniforms {
     pub trees: i32,
     pub night: u32,
     pub snag: f32,
-    pub _pad: [u32; 2],
+    /// River half-width in cells.
+    pub river_hw: f32,
+    pub _pad: u32,
 }
 
 /// A rectangle of the layout in global physical pixels, y down (as monitors
@@ -80,7 +82,7 @@ impl Pipelines {
         let view_layout = uniform_layout(device, "view uniforms");
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("view"),
-            bind_group_layouts: &[Some(&sim.state_layout), Some(&view_layout)],
+            bind_group_layouts: &[Some(&sim.state_layout), Some(&view_layout), Some(&sim.field_layout)],
             immediate_size: 0,
         });
         let module = |label, src| shaders::module(device, label, src);
@@ -226,7 +228,7 @@ impl ViewTargets {
             Renderer::Scene => &p.scene,
             Renderer::Flat => &p.flat,
         };
-        fullscreen_pass(enc, &self.scene_view, pipeline, &[state, &self.view_bind]);
+        fullscreen_pass(enc, &self.scene_view, pipeline, &[state, &self.view_bind, sim.field()]);
         if bolts {
             queue.write_buffer(&self.bolt_buf, 0, bytemuck::bytes_of(bolt_u));
             p.lightning.draw(enc, &self.bolts_view, &self.bolts_bind, &self.bolt_bind, &self.scene_view);

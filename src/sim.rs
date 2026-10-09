@@ -11,6 +11,8 @@ use crate::rng::Rng;
 use crate::shaders::{self, MAX_STRIKES, SETTLED, cause, state};
 
 pub const STATE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Uint;
+/// The river field (see river.rs).
+const FIELD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Lightning strikes per second that get a bolt. Strikes are split between a
 /// short list picked here (so we know where they land) and the rest, which the
@@ -23,6 +25,9 @@ pub struct StepParams {
     pub moore: bool,
     pub wrap: bool,
     pub steps_per_second: f32,
+    pub spotting: f32,
+    /// River width in cells.
+    pub river_w: f32,
 }
 
 /// A cell that lightning set alight.
@@ -41,8 +46,14 @@ struct StepUniforms {
     moore: u32,
     wrap: u32,
     strike_count: u32,
-    _pad: [u32; 2],
+    spotting: f32,
+    river_w: f32,
     strikes: [[i32; 4]; MAX_STRIKES],
+}
+
+struct Field {
+    tex: wgpu::Texture,
+    bind: wgpu::BindGroup,
 }
 
 struct Buffer {
@@ -85,6 +96,10 @@ pub struct Sim {
     pub generation: u64,
     /// Binds a state texture for reading in a fragment shader (group 0).
     pub state_layout: wgpu::BindGroupLayout,
+    /// Binds the river field and a linear sampler (group 2).
+    pub field_layout: wgpu::BindGroupLayout,
+    field: Field,
+    field_sampler: wgpu::Sampler,
     buffers: Option<[Buffer; 2]>,
     current: usize,
     step_pipeline: wgpu::RenderPipeline,
@@ -118,6 +133,34 @@ impl Sim {
                 count: None,
             }],
         });
+        let field_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("river field"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let field_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("river field"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let field = make_field(device, &field_layout, &field_sampler, 1, 1);
         let uniform_layout = uniform_layout(device, "step uniforms");
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("step uniforms"),
@@ -133,7 +176,7 @@ impl Sim {
         let module = shaders::module(device, "step", shaders::step());
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("step"),
-            bind_group_layouts: &[Some(&state_layout), Some(&uniform_layout)],
+            bind_group_layouts: &[Some(&state_layout), Some(&uniform_layout), Some(&field_layout)],
             immediate_size: 0,
         });
         let pipeline = |entry: &str, format| fullscreen_pipeline(device, &layout, &module, entry, format, None);
@@ -154,6 +197,9 @@ impl Sim {
             height: 0,
             generation: 0,
             state_layout,
+            field_layout,
+            field,
+            field_sampler,
             buffers: None,
             current: 0,
             step_pipeline,
@@ -174,15 +220,45 @@ impl Sim {
         self.buffers.as_ref().map(|b| &b[self.current].bind)
     }
 
+    /// The river field, bound for reading (group 2).
+    pub fn field(&self) -> &wgpu::BindGroup {
+        &self.field.bind
+    }
+
+    /// Replace the river field: `w`×`h` RGBA f16 texels.
+    pub fn set_field(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, texels: &[u16]) {
+        let size = self.field.tex.size();
+        if (size.width, size.height) != (w, h) {
+            self.field = make_field(device, &self.field_layout, &self.field_sampler, w, h);
+        }
+        queue.write_texture(
+            self.field.tex.as_image_copy(),
+            bytemuck::cast_slice(texels),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 8), rows_per_image: None },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+    }
+
     /// Size the grid. Cells overlapping the old grid are kept unless `fresh`
-    /// (the cell size changed); new cells are seeded at `density`.
-    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, density: f32, fresh: bool) {
+    /// (the cell size changed); new cells are seeded at `density`, with
+    /// water where `water` says.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        w: u32,
+        h: u32,
+        density: f32,
+        fresh: bool,
+        water: &dyn Fn(u32, u32) -> bool,
+    ) {
         let (w, h) = (w.max(1), h.max(1));
         if w == self.width && h == self.height && self.buffers.is_some() && !fresh {
             return;
         }
         let next = [self.make_buffer(device, w, h), self.make_buffer(device, w, h)];
-        self.write_seed(queue, &next[0].tex, w, h, density);
+        self.write_seed(queue, &next[0].tex, w, h, density, water);
         match &self.buffers {
             Some(old) if !fresh => {
                 let mut enc = device.create_command_encoder(&Default::default());
@@ -201,10 +277,10 @@ impl Sim {
         self.height = h;
     }
 
-    pub fn reseed(&mut self, queue: &wgpu::Queue, density: f32) {
+    pub fn reseed(&mut self, queue: &wgpu::Queue, density: f32, water: &dyn Fn(u32, u32) -> bool) {
         if let Some(b) = &self.buffers {
             let tex = b[self.current].tex.clone();
-            self.write_seed(queue, &tex, self.width, self.height, density);
+            self.write_seed(queue, &tex, self.width, self.height, density, water);
             self.generation = 0;
         }
     }
@@ -223,7 +299,8 @@ impl Sim {
             moore: p.moore as u32,
             wrap: p.wrap as u32,
             strike_count: n as u32,
-            _pad: [0; 2],
+            spotting: p.spotting,
+            river_w: p.river_w,
             strikes: [[0; 4]; MAX_STRIKES],
         };
         let mut strikes = Vec::with_capacity(n);
@@ -239,9 +316,10 @@ impl Sim {
         let src = &buffers[self.current];
         let dst = &buffers[1 - self.current];
         let mut enc = device.create_command_encoder(&Default::default());
-        fullscreen_pass(&mut enc, &dst.view, &self.step_pipeline, &[&src.bind, &self.uniform_bind]);
+        let binds = |state| [state, &self.uniform_bind, &self.field.bind];
+        fullscreen_pass(&mut enc, &dst.view, &self.step_pipeline, &binds(&src.bind));
         let readback = if n > 0 {
-            fullscreen_pass(&mut enc, &self.probe_view, &self.probe_pipeline, &[&dst.bind, &self.uniform_bind]);
+            fullscreen_pass(&mut enc, &self.probe_view, &self.probe_pipeline, &binds(&dst.bind));
             let buf = self.spare.pop().unwrap_or_else(|| {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("strike readback"),
@@ -405,10 +483,12 @@ impl Sim {
         Buffer { tex, view, bind }
     }
 
-    fn write_seed(&mut self, queue: &wgpu::Queue, tex: &wgpu::Texture, w: u32, h: u32, density: f32) {
+    fn write_seed(&mut self, queue: &wgpu::Queue, tex: &wgpu::Texture, w: u32, h: u32, density: f32, water: &dyn Fn(u32, u32) -> bool) {
         let mut data = vec![0u8; (w * h * 4) as usize];
-        for px in data.chunks_exact_mut(4) {
-            if self.rng.f32() < density {
+        for (i, px) in data.chunks_exact_mut(4).enumerate() {
+            if water(i as u32 % w, i as u32 / w) {
+                px.copy_from_slice(&[state::WATER, state::WATER, cause::NONE, SETTLED]);
+            } else if self.rng.f32() < density {
                 px[0] = state::TREE;
                 px[1] = state::TREE;
             } else {
@@ -422,6 +502,29 @@ impl Sim {
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
     }
+}
+
+fn make_field(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler, w: u32, h: u32) -> Field {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("river field"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FIELD_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&Default::default());
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("river field"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    });
+    Field { tex, bind }
 }
 
 /// Bytes per row of a texture copied into a buffer, which must be a multiple

@@ -12,6 +12,7 @@ mod input;
 mod lightning;
 mod params;
 mod render;
+mod river;
 mod rng;
 mod save;
 #[cfg(target_os = "linux")]
@@ -53,6 +54,7 @@ usage: tinderbox [options]
       --cell N               cell size in pixels (default 64)
       --steps N              steps to run after igniting each view's center (default 3)
       --progress X           how far through the last step, 0 to 1 (default 0.5)
+      --river-steps N        run the river on by N steps first (default 0)
       --flat, --night        renderer and lighting
   --saver             screensaver mode (Linux, X11): draw into the window in
                       XSCREENSAVER_WINDOW, for xsecurelock or xscreensaver

@@ -49,6 +49,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     let layout = Layout { views: rects, scale: 1.0 }.normalized();
     let mut e = Engine::new(device, queue, layout.clone(), params);
+    // Run the river on (in chunks, so lakes and sand form as they would).
+    let river_steps = num("--river-steps", 0.0)? as u32;
+    for _ in 0..river_steps.div_ceil(100) {
+        e.advance_river(100, true);
+    }
     for r in &layout.views {
         e.ignite(r.x as f64 + r.w as f64 / 2.0, r.y as f64 + r.h as f64 / 2.0, false);
     }

@@ -24,12 +24,15 @@ struct View {
   night: u32,
   // Scene renderer: average steps a snag stands after its cell clears.
   snag: f32,
-  _pad1: u32,
-  _pad2: u32,
+  // River half-width, in cells.
+  river_hw: f32,
+  _pad: u32,
 }
 
 @group(0) @binding(0) var state: texture_2d<u32>;
 @group(1) @binding(0) var<uniform> view: View;
+@group(2) @binding(0) var field: texture_2d<f32>;
+@group(2) @binding(1) var field_sampler: sampler;
 
 var<private> grid_size: vec2<i32>;
 
@@ -51,6 +54,12 @@ fn cell_at(c0: vec2<i32>) -> vec4<u32> {
     return vec4<u32>(EMPTY, EMPTY, CAUSE_NONE, SETTLED);
   }
   return textureLoad(state, c, 0);
+}
+
+// The river field at a point (see river.rs): r = signed distance to the
+// water's edge in cells, gb = flow, a = fresh sand.
+fn river_at(p: vec2<f32>) -> vec4<f32> {
+  return textureSampleLevel(field, field_sampler, p / vec2<f32>(grid_size), 0.0);
 }
 
 // Steps since the ground was cleared by fire, at progress s through the step:

@@ -7,6 +7,8 @@ use crate::critical;
 use crate::lightning::BoltUniforms;
 use crate::params::{Params, Renderer};
 use crate::render::{Pipelines, Rect, ViewTargets, ViewUniforms};
+use crate::river::{self, River};
+use crate::rng::Rng;
 use crate::save;
 use crate::shaders::hashf;
 use crate::sim::{Sim, StepParams, Strike};
@@ -21,6 +23,8 @@ const SLOW_FPS: f64 = 40.0;
 const FAST_FPS: f64 = 57.0;
 /// How often the app saves the grid (see save.rs).
 const SAVE_SECS: f64 = 5.0;
+/// The river field is redrawn and uploaded at most this often.
+const RIVER_SECS: f64 = 0.25;
 
 /// Where the views sit. The grid covers the bounding box of all of them;
 /// cells in gaps between monitors are simulated but not seen.
@@ -72,6 +76,8 @@ pub struct Engine {
     adapt: Adapt,
     bolts: bool,
     saved_at: Instant,
+    pub river: Option<River>,
+    river_at: Instant,
 }
 
 /// Lower the render resolution while frames are slow, and creep back up after
@@ -113,6 +119,8 @@ impl Engine {
             adapt: Adapt::default(),
             bolts: false,
             saved_at: now,
+            river: None,
+            river_at: now,
         };
         e.reset_resolution();
         e.fit_grid();
@@ -149,8 +157,50 @@ impl Engine {
         let gh = ((h as f64 / c).ceil() as u32).clamp(1, self.max_texture);
         let fresh = self.params.cell_size != self.cell_size;
         self.cell_size = self.params.cell_size;
-        self.sim.resize(&self.device, &self.queue, gw, gh, self.params.initial_density, fresh);
+        self.place_river(gw, gh, fresh);
+        let river = self.river.as_ref();
+        let water = |x, y| river.is_some_and(|r| r.water(x, y));
+        self.sim.resize(&self.device, &self.queue, gw, gh, self.params.initial_density, fresh, &water);
         self.lock_critical();
+    }
+
+    /// Make the river match the params and a `gw`×`gh` grid: a new one if
+    /// `fresh`, else the current one stretched to fit. Uploads its field.
+    fn place_river(&mut self, gw: u32, gh: u32, fresh: bool) {
+        // No room for a river on a tiny grid (the web canvas starts at 1×1).
+        if !self.params.river || gw < 8 || gh < 8 {
+            self.river = None;
+        } else {
+            let w = self.params.river_width / self.params.cell_size;
+            match &mut self.river {
+                Some(r) if !fresh => {
+                    r.fit(gw, gh);
+                    r.set_width(w);
+                }
+                _ => self.river = Some(River::new(gw, gh, w, Rng::from_clock().next_u64())),
+            }
+        }
+        self.upload_river();
+    }
+
+    fn upload_river(&mut self) {
+        match &mut self.river {
+            Some(r) => {
+                let texels = r.raster();
+                self.sim.set_field(&self.device, &self.queue, r.fw, r.fh, &texels);
+            }
+            None => self.sim.set_field(&self.device, &self.queue, 1, 1, &river::dry_field()),
+        }
+        self.river_at = Instant::now();
+    }
+
+    /// Run the river on by `steps`, uploading it now and then (or `now`).
+    pub fn advance_river(&mut self, steps: u32, now: bool) {
+        let Some(r) = &mut self.river else { return };
+        r.advance(steps as f32, self.params.meander);
+        if r.changed() && (now || self.river_at.elapsed().as_secs_f64() >= RIVER_SECS) {
+            self.upload_river();
+        }
     }
 
     /// With the lock on, growth is capped and lightning follows from it.
@@ -169,6 +219,8 @@ impl Engine {
         }
         if self.params.cell_size != self.saved.cell_size {
             self.fit_grid();
+        } else if self.params.river != self.saved.river || self.params.river_width != self.saved.river_width {
+            self.place_river(self.sim.width, self.sim.height, false);
         }
         if self.params.renderer != self.saved.renderer {
             self.reset_resolution();
@@ -189,6 +241,13 @@ impl Engine {
             && cell_size == self.cell_size
         {
             self.sim.restore(&self.queue, &s);
+            if self.params.river
+                && let Some(mut r) = save::load_river().and_then(|b| River::restore(&b, self.sim.width, self.sim.height))
+            {
+                r.set_width(self.params.river_width / self.params.cell_size);
+                self.river = Some(r);
+                self.upload_river();
+            }
         }
     }
 
@@ -197,6 +256,7 @@ impl Engine {
     pub fn autosave(&mut self) {
         if let Some(s) = self.sim.captured() {
             save::store(&s, self.cell_size);
+            self.store_river();
         }
         if self.saved_at.elapsed().as_secs_f64() >= SAVE_SECS {
             self.saved_at = Instant::now();
@@ -211,11 +271,20 @@ impl Engine {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         if let Some(s) = self.sim.captured() {
             save::store(&s, self.cell_size);
+            self.store_river();
+        }
+    }
+
+    fn store_river(&self) {
+        if let Some(r) = &self.river {
+            save::store_river(&r.save());
         }
     }
 
     pub fn reseed(&mut self) {
-        self.sim.reseed(&self.queue, self.params.initial_density);
+        let river = self.river.as_ref();
+        let water = |x, y| river.is_some_and(|r| r.water(x, y));
+        self.sim.reseed(&self.queue, self.params.initial_density, &water);
     }
 
     fn step_params(&self) -> StepParams {
@@ -225,12 +294,15 @@ impl Engine {
             moore: self.params.moore,
             wrap: self.params.wrap,
             steps_per_second: self.params.steps_per_second,
+            spotting: if self.river.is_some() { self.params.spotting } else { 0.0 },
+            river_w: self.river.as_ref().map_or(1.0, River::width),
         }
     }
 
     pub fn step_once(&mut self) {
         let p = self.step_params();
         self.sim.step(&self.device, &self.queue, &p);
+        self.advance_river(1, true);
         self.debt = 0.0;
     }
 
@@ -253,6 +325,7 @@ impl Engine {
                 self.sim.step(&self.device, &self.queue, &p);
             }
             self.debt = if n == MAX_STEPS_PER_FRAME { 0.0 } else { self.debt - n as f32 };
+            self.advance_river(n, false);
         } else {
             self.debt = (self.debt + dt * self.params.steps_per_second.min(PAUSED_STEPS_PER_SECOND)).min(1.0);
         }
@@ -330,7 +403,8 @@ impl Engine {
             // Keep trees at least 4 px apart.
             trees: (p.trees.round() as i32).min((cell_rendered / 4.0).floor() as i32).max(1),
             night: p.night as u32,
-            _pad: [0; 2],
+            river_hw: self.river.as_ref().map_or(1.0, |r| r.width() * 0.5),
+            _pad: 0,
         };
         let bu = BoltUniforms { origin, size: [r.w as f32, r.h as f32], sky: self.pipelines.lightning.sky, _pad: [0.0; 3] };
         let renderer = if p.renderer == Renderer::Flat { Renderer::Flat } else { Renderer::Scene };

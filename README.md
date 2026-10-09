@@ -10,6 +10,8 @@ Each step, every cell updates at the same time:
 
 The interesting regime is f ≪ p ≪ 1. Fires then follow a power-law size distribution (self-organized criticality).
 
+A **river** meanders across the forest (it can be turned off). Its cells are water, which never grows trees or burns, so it's a firebreak. Trees grow faster on its banks, and now and then embers jump it to a tree on the far bank (**Ember jumps**). The river slowly migrates: bends grow and drift downstream (a Howard–Knutson model; see `src/river.rs`). When a bend's neck closes, the loop is cut off as an oxbow lake, which silts up into marsh and greens over. Trees on the outer bank fall in as it erodes. Fresh sand on the inner bank (point bars) grows back to grass.
+
 ## Download
 
 Binaries for Linux (x86_64), macOS (Apple Silicon) and Windows (x86_64) are on the [releases page](https://github.com/aiguy110/tinderbox/releases). They need a GPU with Vulkan, Metal or DirectX 12 support.
@@ -105,7 +107,7 @@ trunk build --release                   # web build into dist/
 
 On several monitors the grid covers their bounding box, and each monitor shows its own part of it, so fires burn across the seams. Cells are sized in the primary monitor's logical pixels.
 
-**Controls:** use the panel to set cell size, trees per cell, p, f, speed, regrowth time, snag life, seed density, neighborhood, edge wrap, and day or night. The scene renderer wants big, slow cells: try 48–96 px and 3–5 s per step. Keys:
+**Controls:** use the panel to set cell size, trees per cell, p, f, speed, regrowth time, snag life, seed density, neighborhood, edge wrap, day or night, and the river (on or off, width, meander rate, ember jumps). The scene renderer wants big, slow cells: try 48–96 px and 3–5 s per step. Keys:
 
 - `H` or the × / ☰ buttons hide and show the panel
 - `F` toggles fullscreen (web and `--windowed`)
@@ -113,7 +115,7 @@ On several monitors the grid covers their bounding box, and each monitor shows i
 - `.` steps once
 - `Esc` quits (native)
 
-Click or drag to start fires. Settings, including whether the panel is hidden, are saved (localStorage on the web, `~/.config/tinderbox/params.json` natively). The forest itself is saved every few seconds and picks up where it left off (localStorage on the web, `~/.local/state/tinderbox/grid.bin` natively).
+Click or drag to start fires. Settings, including whether the panel is hidden, are saved (localStorage on the web, `~/.config/tinderbox/params.json` natively). The forest itself is saved every few seconds and picks up where it left off (localStorage on the web, `~/.local/state/tinderbox/grid.bin` natively), along with the river's course.
 
 While it runs, the screen stays awake: on the web it holds a screen wake lock (phones included; the browser lifts it when the tab is hidden), and on Linux it asks the desktop (GNOME, or any desktop with the freedesktop screensaver interface) not to blank, lock or suspend. Not yet on macOS or Windows.
 
@@ -126,15 +128,16 @@ While it runs, the screen stays awake: on the web it holds a screen wake lock (p
 - `src/app.rs`: windows (canvas, desktop window, or one per monitor), surfaces, input and the frame loop
 - `src/ui.rs`, `src/input.rs`, `src/params.rs`: the egui panel, its input, and saved settings
 - `src/lightning.rs`: bolt geometry and drawing
+- `src/river.rs`: the river's migration, cutoffs and oxbow lakes on the CPU, drawn into a distance field that the step rule and renderers read
 - `src/shot.rs`: headless rendering of a virtual monitor layout to PNG (`--shot`)
 
 ## State encoding
 
 One `RGBA8UI` texel per cell holds:
 
-- `R`: the current state (`EMPTY`, `TREE`, `FIRE`, `BURNT`)
+- `R`: the current state (`EMPTY`, `TREE`, `FIRE`, `BURNT`, `WATER`)
 - `G`: the previous state
-- `B`: the cause of the last transition (`GROW`, `MATURE`, `SPREAD`, `LIGHTNING`, `BURNING`, `BURNOUT`, `CLEAR`). `MATURE` marks a tree's second step, so saplings can grow over two steps
+- `B`: the cause of the last transition (`GROW`, `MATURE`, `SPREAD`, `LIGHTNING`, `BURNING`, `BURNOUT`, `CLEAR`, plus `ERODE` and `DEPOSIT` when the river takes or leaves a cell, and `SPOT` for embers that jumped it). `MATURE` marks a tree's second step, so saplings can grow over two steps
 - `A`: for `SPREAD` (and the `BURNING` step after it), a bitmask of the neighbors that were burning. For `EMPTY`, and for a tree in its first two steps, the steps since the ground burned (255 = never burned)
 
 This gives the renderer the full temporal transition for each cell without extra passes.
@@ -148,6 +151,8 @@ The default renderer draws everything in the fragment shader, with no art assets
 - **Burning:** flames flare up each crown, lean with the wind and flicker, then die back as the needles scorch and burn away. Sparks rise on the wind and smoke drifts off.
 - **Burnt:** flames go out tree by tree, leaving charred snags with glowing embers on ash.
 - **Afterwards:** snags stand for about Snag life steps (default 10), then tip and crumble. The ash washes into the dirt, and grass grows back in patches over Regrowth steps.
+
+The **river** flows, with ripples carried along its course, foam at the banks and glints that reflect firelight. Oxbow lakes lie still and turn reedy as they silt up.
 
 **Night** switches to moonlight, so fires light up their surroundings. The design is in [docs/PLAN.md](docs/PLAN.md).
 

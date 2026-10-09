@@ -18,12 +18,15 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     c = mix(vec3<f32>(1.0, 0.35, 0.05), vec3<f32>(1.0, 0.75, 0.2), jitter);
     if (cause == CAUSE_LIGHTNING) { c = vec3<f32>(0.85, 0.92, 1.0); }
     if (cause == CAUSE_BURNING) { c *= 0.7; }
+  } else if (s == WATER) {
+    c = mix(vec3<f32>(0.08, 0.22, 0.32), vec3<f32>(0.10, 0.25, 0.35), jitter);
   } else if (s == BURNT) {
     c = mix(vec3<f32>(0.07, 0.06, 0.05), vec3<f32>(0.11, 0.09, 0.08), jitter);
   } else {
     let dirt = mix(vec3<f32>(0.20, 0.14, 0.09), vec3<f32>(0.24, 0.17, 0.11), jitter);
     let grass = mix(vec3<f32>(0.30, 0.52, 0.16), vec3<f32>(0.36, 0.58, 0.20), jitter);
     c = mix(dirt, grass, regrowth(t, 1.0));
+    c = mix(c, vec3<f32>(0.62, 0.55, 0.40), river_at(vec2<f32>(cell) + 0.5).a);
   }
 
   c *= grid_line(p, view.scale.x / view.cell_px);

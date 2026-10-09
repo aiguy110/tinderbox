@@ -1,5 +1,7 @@
 // The Drossel–Schwabl update rule, one fragment per cell, plus a probe pass
-// that reports which of the CPU-picked lightning strikes lit a tree.
+// that reports which of the CPU-picked lightning strikes lit a tree. The
+// river field (river.rs) decides which cells are water, makes trees grow
+// faster on its banks, and lets embers jump it now and then.
 
 struct Step {
   seed: u32,
@@ -8,14 +10,17 @@ struct Step {
   moore: u32,
   wrap_edges: u32,
   strike_count: u32,
-  _pad0: u32,
-  _pad1: u32,
+  // Chance per step that a bank tree catches from fire across the river.
+  spotting: f32,
+  // Channel width in cells.
+  river_w: f32,
   // .xy of each; vec4 because uniform arrays have a 16-byte stride.
   strikes: array<vec4<i32>, MAX_STRIKES>,
 }
 
 @group(0) @binding(0) var state: texture_2d<u32>;
 @group(1) @binding(0) var<uniform> u: Step;
+@group(2) @binding(0) var field: texture_2d<f32>;
 
 var<private> grid_size: vec2<i32>;
 
@@ -45,12 +50,44 @@ fn burning(p0: vec2<i32>) -> bool {
   return textureLoad(state, p, 0).r == FIRE;
 }
 
+fn wrapped(p: vec2<i32>) -> vec2<i32> {
+  if (u.wrap_edges != 0u) { return (p + grid_size) % grid_size; }
+  return p;
+}
+
+// The river field texel at a cell's center.
+fn field_at(p: vec2<i32>) -> vec4<f32> {
+  let fd = vec2<i32>(textureDimensions(field));
+  let t = vec2<i32>((vec2<f32>(wrapped(p)) + 0.5) * vec2<f32>(fd) / vec2<f32>(grid_size));
+  return textureLoad(field, clamp(t, vec2<i32>(0), fd - 1), 0);
+}
+
+// Embers carried across the river: a tree on the bank may catch from a
+// burning cell straight across the water.
+fn spotted(p: vec2<i32>, f: vec4<f32>) -> bool {
+  let l = length(f.gb);
+  // Rivers only (lakes have weak flow), and only trees near the bank.
+  if (u.spotting <= 0.0 || l < 0.5 || f.r > 1.5) { return false; }
+  let t = f.gb / l;
+  var n = vec2<f32>(-t.y, t.x);
+  if (field_at(p + vec2<i32>(round(n * 2.0))).r > f.r) { n = -n; }
+  let q = p + vec2<i32>(round(n * (u.river_w + 1.5 + f.r)));
+  let side = vec2<i32>(round(t));
+  return (burning(q) || burning(q + side) || burning(q - side)) && rand(p, 0x5bd1e995u) < u.spotting;
+}
+
 @fragment
 fn fs_step(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<u32> {
   grid_size = vec2<i32>(textureDimensions(state));
   let p = vec2<i32>(pos.xy);
   let cur = textureLoad(state, p, 0);
   let s = cur.r;
+  let f = field_at(p);
+  if (f.r < 0.0) {
+    if (s == WATER) { return vec4<u32>(WATER, WATER, CAUSE_NONE, SETTLED); }
+    return vec4<u32>(WATER, s, CAUSE_ERODE, SETTLED);
+  }
+  if (s == WATER) { return vec4<u32>(EMPTY, WATER, CAUSE_DEPOSIT, SETTLED); }
   var next = s;
   var cause = CAUSE_NONE;
   var a = 0u;
@@ -77,12 +114,15 @@ fn fs_step(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<u32> {
     } else if (struck(p) || rand(p, 0x9e3779b9u) < u.lightning) {
       next = FIRE;
       cause = CAUSE_LIGHTNING;
+    } else if (spotted(p, f)) {
+      next = FIRE;
+      cause = CAUSE_SPOT;
     } else if (cur.b == CAUSE_GROW) {
       // A second step of growing, still keeping the ground's age.
       cause = CAUSE_MATURE;
       a = cur.a;
     }
-  } else if (rand(p, 0x85ebca6bu) < u.growth) {
+  } else if (rand(p, 0x85ebca6bu) < u.growth * (1.0 + RIPARIAN * (1.0 - smoothstep(0.0, max(u.river_w, 1.0), f.r)))) {
     // A sapling keeps the age of the ground it grows from, to draw it.
     next = TREE;
     cause = CAUSE_GROW;

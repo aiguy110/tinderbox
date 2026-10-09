@@ -4,6 +4,9 @@
 //       (see Neighbor in shaders.rs); for EMPTY, and for a tree in its first
 //       two steps (causes GROW then MATURE), steps since the ground was
 //       cleared by fire (saturating at 255).
+// WATER cells are wherever the river field (see river.rs) says, and are
+// always (WATER, prev, ERODE or NONE, SETTLED); a cell the river leaves
+// becomes EMPTY ground that never burned.
 // A fire lasts two steps (catching, then burning), leaves a burnt stand for
 // one step, and then clears to bare dirt, which greens back over a few steps.
 // Keeping (prev, cause, a) alongside the state means a renderer can pick the

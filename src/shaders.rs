@@ -9,6 +9,8 @@ pub mod state {
     pub const TREE: u8 = 1;
     pub const FIRE: u8 = 2;
     pub const BURNT: u8 = 3;
+    /// River or lake; set and cleared by the step shader from the river field.
+    pub const WATER: u8 = 4;
 }
 
 pub mod cause {
@@ -20,6 +22,12 @@ pub mod cause {
     pub const BURNING: u8 = 5;
     pub const CLEAR: u8 = 6;
     pub const MATURE: u8 = 7;
+    /// The river took the cell (from the state in g).
+    pub const ERODE: u8 = 8;
+    /// The river left the cell.
+    pub const DEPOSIT: u8 = 9;
+    /// Caught from embers blown across the water.
+    pub const SPOT: u8 = 10;
 }
 
 /// Ground age of grass that has never burned.
@@ -37,6 +45,7 @@ fn prelude() -> String {
         ("TREE", TREE),
         ("FIRE", FIRE),
         ("BURNT", BURNT),
+        ("WATER", WATER),
         ("CAUSE_NONE", NONE),
         ("CAUSE_GROW", GROW),
         ("CAUSE_SPREAD", SPREAD),
@@ -45,10 +54,14 @@ fn prelude() -> String {
         ("CAUSE_BURNING", BURNING),
         ("CAUSE_CLEAR", CLEAR),
         ("CAUSE_MATURE", MATURE),
+        ("CAUSE_ERODE", ERODE),
+        ("CAUSE_DEPOSIT", DEPOSIT),
+        ("CAUSE_SPOT", SPOT),
         ("SETTLED", SETTLED),
     ];
     let mut s: String = consts.iter().map(|(n, v)| format!("const {n}: u32 = {v}u;\n")).collect();
     s += &format!("const MAX_STRIKES: u32 = {MAX_STRIKES}u;\n");
+    s += &format!("const RIPARIAN: f32 = {:?};\n", crate::river::RIPARIAN);
     let nb: Vec<String> = NEIGHBORS.iter().map(|(x, y)| format!("vec2<i32>({x}, {y})")).collect();
     s += &format!("const NEIGHBORS = array<vec2<i32>, 8>({});\n", nb.join(", "));
     s + include_str!("shaders/common.wgsl")

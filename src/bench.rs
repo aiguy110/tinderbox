@@ -6,11 +6,15 @@
 //! Each fire carries an id (merged with union-find when two fires meet), and
 //! its size is the number of trees it burned. The score is how many decades
 //! of the fire-size distribution are a straight line on log-log axes.
+//! With `--river`, a river (already meandering, but standing still) splits
+//! the grid, and trees grow faster on its banks as in the app; embers don't
+//! jump it.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use crate::river::{River, riparian};
 use crate::rng::Rng;
 
 const EMPTY: u8 = 0;
@@ -21,6 +25,7 @@ const CATCH: u8 = 2;
 const FIRE_A: u8 = 3;
 const FIRE_B: u8 = 4;
 const BURNT: u8 = 5;
+const WATER: u8 = 6;
 
 const N4: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 const N8: [(i32, i32); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
@@ -34,6 +39,8 @@ pub struct Config {
     pub growth: f64,
     /// p/f.
     pub theta: f64,
+    /// River width in cells; 0 for none.
+    pub river: f32,
 }
 
 pub struct Run {
@@ -88,6 +95,10 @@ struct Sim {
     burnt: Vec<u32>,
     trees: u64,
     rng: Rng,
+    /// Growth multiplier per cell (faster on river banks), if there's a
+    /// river, and its largest value.
+    mult: Vec<f32>,
+    max_mult: f64,
 }
 
 impl Sim {
@@ -96,7 +107,19 @@ impl Sim {
         let mut rng = Rng::new(seed);
         // Start near the steady-state density so warm-up is short.
         let rho = if c.moore { 0.3 } else { 0.4 };
-        let state: Vec<u8> = (0..n).map(|_| if rng.f64() < rho { TREE } else { EMPTY }).collect();
+        let mut state: Vec<u8> = (0..n).map(|_| if rng.f64() < rho { TREE } else { EMPTY }).collect();
+        let mut mult = Vec::new();
+        if c.river > 0.0 {
+            let mut r = River::with_scale(c.w, c.h, c.river, rng.next_u64(), 1.0);
+            r.raster();
+            mult = (0..n as u32).map(|i| riparian(r.cell_dist(i % c.w, i / c.w), r.width())).collect();
+            for (i, s) in state.iter_mut().enumerate() {
+                if r.water(i as u32 % c.w, i as u32 / c.w) {
+                    *s = WATER;
+                }
+            }
+        }
+        let max_mult = mult.iter().fold(1.0f32, |m, &v| m.max(v)) as f64;
         let trees = state.iter().filter(|&&s| s == TREE).count() as u64;
         Sim {
             c,
@@ -108,6 +131,8 @@ impl Sim {
             burnt: vec![],
             trees,
             rng,
+            mult,
+            max_mult,
         }
     }
 
@@ -136,9 +161,14 @@ impl Sim {
         self.caught.push(i);
     }
 
+    /// Grow trees at `picks` random cells, scaled up by `max_mult` (and
+    /// thinned out again where the multiplier is lower).
     fn grow(&mut self, picks: u64) {
         for _ in 0..picks {
             let i = self.rng.below(self.cells()) as usize;
+            if !self.mult.is_empty() && self.rng.f64() * self.max_mult >= self.mult[i] as f64 {
+                continue;
+            }
             if self.state[i] == EMPTY {
                 self.state[i] = TREE;
                 self.trees += 1;
@@ -182,7 +212,7 @@ impl Sim {
         }
         // Growth sees the state at the start of the step, so cells that clear
         // or catch during it aren't eligible; both are already non-EMPTY.
-        let g = poisson(&mut self.rng, n * self.c.growth);
+        let g = poisson(&mut self.rng, n * self.c.growth * self.max_mult);
         self.grow(g);
 
         for i in self.burnt.drain(..) {
@@ -220,7 +250,7 @@ impl Sim {
     fn skip(&mut self) -> u64 {
         let rate = self.cells() as f64 * self.c.growth / self.c.theta;
         let gap = (-(1.0 - self.rng.f64()).ln() / rate).floor() as u64;
-        let mean = self.cells() as f64 * self.c.growth * gap as f64;
+        let mean = self.cells() as f64 * self.c.growth * self.max_mult * gap as f64;
         let g = poisson(&mut self.rng, mean);
         self.grow(g);
         gap
@@ -371,6 +401,8 @@ law, its exponent, and how close fires come to spanning the grid.
   --p X,...          growth per step (default 0.001)
   --moore            8-neighbor spread (--both for 4 and 8)
   --no-wrap          hard edges
+  --river W,...      a river W cells wide (default 0, none); it meanders
+                     first, then stands still
   --fires N          fires to record per run (default 20000)
   --secs S           time budget per run (default 300)
   --threads N        runs at once (default: all cores)
@@ -418,26 +450,34 @@ pub fn main(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("{f}: {e}"))?
             .lines()
             .skip(1)
-            .map(|l| l.split('\t').take(5).collect::<Vec<_>>().join("\t"))
+            .map(|l| {
+                // The key, plus the river (the last column; older sweeps have none).
+                let cols: Vec<&str> = l.split('\t').collect();
+                let river = if cols.len() > 15 { cols[cols.len() - 1] } else { "0" };
+                format!("{}\t{river}", cols[..5.min(cols.len())].join("\t"))
+            })
             .collect(),
         None => Default::default(),
     };
     let key = |c: &Config| format!("{}\t{}\t{}\t{}\t{}", c.w, c.h, c.moore as u8, c.growth, c.theta);
+    let rivers: Vec<f32> = list(args, "--river", "0")?;
     let mut configs = vec![];
     for &(w, h) in &grids {
         for &moore in &moores {
             for &growth in &ps {
                 for &theta in &thetas {
-                    let c = Config { w, h, moore, wrap, growth, theta };
-                    if !done.contains(&key(&c)) {
-                        configs.push(c);
+                    for &river in &rivers {
+                        let c = Config { w, h, moore, wrap, growth, theta, river };
+                        if !done.contains(&format!("{}\t{}", key(&c), c.river)) {
+                            configs.push(c);
+                        }
                     }
                 }
             }
         }
     }
     if done.is_empty() {
-        println!("w\th\tmoore\tp\ttheta\tfires\tsteps\tdensity\tdecades\ttau\tlo\thi\tlargest\tspanning\tsecs");
+        println!("w\th\tmoore\tp\ttheta\tfires\tsteps\tdensity\tdecades\ttau\tlo\thi\tlargest\tspanning\tsecs\triver");
     }
     eprintln!("{} runs", configs.len());
     let next = AtomicUsize::new(0);
@@ -453,13 +493,14 @@ pub fn main(args: &[String]) -> Result<(), String> {
                     let r = run(c, fires, secs, seed ^ (k as u64).wrapping_mul(0x9e3779b97f4a7c15));
                     let f = fit(&r.sizes, c.w * c.h);
                     if let Some(d) = &sizes_dir {
-                        let name = format!("{d}/{}x{}-{}-p{}-t{}.txt", c.w, c.h, if c.moore { 8 } else { 4 }, c.growth, c.theta);
+                        let river = if c.river > 0.0 { format!("-r{}", c.river) } else { String::new() };
+                        let name = format!("{d}/{}x{}-{}-p{}-t{}{river}.txt", c.w, c.h, if c.moore { 8 } else { 4 }, c.growth, c.theta);
                         let body: String = r.sizes.iter().map(|s| format!("{s}\n")).collect();
                         let _ = std::fs::write(name, body);
                     }
                     let _g = print.lock();
                     println!(
-                        "{}\t{}\t{}\t{:.3}\t{:.2}\t{:.3}\t{:.0}\t{:.0}\t{:.4}\t{:.3}\t{:.0}",
+                        "{}\t{}\t{}\t{:.3}\t{:.2}\t{:.3}\t{:.0}\t{:.0}\t{:.4}\t{:.3}\t{:.0}\t{}",
                         key(&c),
                         r.sizes.len(),
                         r.steps,
@@ -470,7 +511,8 @@ pub fn main(args: &[String]) -> Result<(), String> {
                         f.hi,
                         f.largest,
                         f.spanning,
-                        t.elapsed().as_secs_f64()
+                        t.elapsed().as_secs_f64(),
+                        c.river
                     );
                 }
             });
@@ -495,10 +537,12 @@ mod tests {
 
     #[test]
     fn fires_are_counted_once_each() {
-        let c = Config { w: 64, h: 64, moore: false, wrap: true, growth: 0.01, theta: 100.0 };
-        let r = run(c, 2000, 30.0, 1);
-        assert_eq!(r.sizes.len(), 2000);
-        assert!(r.sizes.iter().all(|&s| (1..=64 * 64 * 4).contains(&s)));
-        assert!(r.density > 0.1 && r.density < 0.8, "density {}", r.density);
+        for river in [0.0, 4.0] {
+            let c = Config { w: 64, h: 64, moore: false, wrap: true, growth: 0.01, theta: 100.0, river };
+            let r = run(c, 2000, 30.0, 1);
+            assert_eq!(r.sizes.len(), 2000);
+            assert!(r.sizes.iter().all(|&s| (1..=64 * 64 * 4).contains(&s)));
+            assert!(r.density > 0.1 && r.density < 0.8, "density {}", r.density);
+        }
     }
 }
