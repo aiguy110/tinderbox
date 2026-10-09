@@ -212,6 +212,7 @@ The M2 recipe with five looks, so 625 configurations:
 ## Log
 
 - **2026-10-09 (afternoon):** `tinderbox update` (`src/update.rs`) installs the latest GitHub release over the running binary via system `curl` and `tar` (no HTTP/TLS crates), renaming over it (on Windows the running exe is renamed to `.old` first and removed on the next update); `--force` reinstalls. Also `--version`. Tested on Linux with `--force` against v0.4.0, including through a symlink; macOS and Windows untested. Released v0.5.0.
+- **2026-10-09 (night):** Release builds never hit the rust-cache: caches saved on a tag ref are invisible to other tags. The workflow now also builds on pushes to main (Rust paths only, superseded runs cancelled) to save the cache there; tag runs restore it without saving.
 - **2026-10-09 (evening, later):** Keep the screen awake while running (web wake lock; Linux GNOME/freedesktop inhibitor). Released v0.7.0.
 - **2026-10-09 (evening):** Snag life slider (1–120 steps, default 10); Regrowth goes to 240 steps (log slider; ground age saturates at 254). Grass slightly and pine green notably lighter, so black snags read against live trees. Released v0.6.0.
 - **2026-10-09 (late morning):** Released v0.4.0 (save/resume, skeletal snags).
