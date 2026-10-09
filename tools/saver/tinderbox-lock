@@ -1,0 +1,11 @@
+#!/bin/sh
+# Lock the screen with tinderbox drawing behind xsecurelock's password prompt:
+# after 10 idle minutes, on `loginctl lock-session`, and before suspend. Run it
+# once per X session (see README.md, "Lock screen"). Needs xsecurelock and
+# xss-lock, and tinderbox-saver next to this script.
+here=$(dirname "$(readlink -f "$0")")
+export XSECURELOCK_SAVER="${XSECURELOCK_SAVER:-$here/tinderbox-saver}"
+# Keep drawing rather than blanking the screen after 10 minutes.
+export XSECURELOCK_BLANK_TIMEOUT="${XSECURELOCK_BLANK_TIMEOUT:--1}"
+xset s "${TINDERBOX_IDLE_SECONDS:-600}" 0
+exec xss-lock -l -- xsecurelock

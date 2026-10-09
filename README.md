@@ -10,9 +10,87 @@ Each step, every cell updates at the same time:
 
 The interesting regime is f ≪ p ≪ 1. Fires then follow a power-law size distribution (self-organized criticality).
 
+## Download
+
+Binaries for Linux (x86_64), macOS (Apple Silicon) and Windows (x86_64) are on the [releases page](https://github.com/aiguy110/tinderbox/releases). They need a GPU with Vulkan, Metal or DirectX 12 support.
+
+- **Linux:** `tar xzf tinderbox-linux-x86_64.tar.gz`, then run `tinderbox-linux-x86_64/tinderbox`. To have it on your PATH, copy `tinderbox`, `tinderbox-saver` and `tinderbox-lock` into `~/.local/bin`.
+- **macOS:** extract the archive, then run `xattr -d com.apple.quarantine tinderbox` once (the binary isn't signed) and `./tinderbox`.
+- **Windows:** extract the zip and run `tinderbox.exe`. SmartScreen may warn about an unrecognized app; choose *More info → Run anyway*.
+
+By default it spans every monitor fullscreen; `Esc` quits. `tinderbox --windowed` runs in a window, and `tinderbox --help` lists the other options. Controls are under [Run](#run).
+
+## Lock screen (Linux, X11)
+
+`tinderbox --saver` draws into a window owned by a screen locker, so the forest keeps burning behind the password prompt. The locker handles the keyboard, mouse and unlocking. tinderbox only draws.
+
+The saver uses the settings you last saved in the regular app (`~/.config/tinderbox/params.json`), so set it up the way you like there first. Big, slow cells look best, for example 64 px and 0.3 steps per second. Each monitor runs its own forest.
+
+xsecurelock and xscreensaver only work in an X11 session, not Wayland. On Ubuntu, pick *Ubuntu on Xorg* from the gear on the login screen.
+
+### xsecurelock (recommended)
+
+[xsecurelock](https://github.com/google/xsecurelock) runs a saver program behind its password prompt. [xss-lock](https://bitbucket.org/raymonad/xss-lock) runs xsecurelock when the screen should lock.
+
+1. Install both, and put the three tinderbox files on your PATH:
+
+   ```sh
+   sudo apt install xsecurelock xss-lock          # Debian/Ubuntu; Arch: xsecurelock, xss-lock
+   mkdir -p ~/.local/bin
+   cp tinderbox tinderbox-saver tinderbox-lock ~/.local/bin/
+   ```
+
+2. Try it. This locks the screen right away, with tinderbox behind it. Type your password to unlock:
+
+   ```sh
+   XSECURELOCK_SAVER=~/.local/bin/tinderbox-saver XSECURELOCK_BLANK_TIMEOUT=-1 xsecurelock
+   ```
+
+3. Start `tinderbox-lock` when you log in. It locks after 10 idle minutes (set `TINDERBOX_IDLE_SECONDS` to change that), on `loginctl lock-session`, and before suspend:
+
+   ```sh
+   mkdir -p ~/.config/autostart
+   cat > ~/.config/autostart/tinderbox-lock.desktop <<DESKTOP
+   [Desktop Entry]
+   Type=Application
+   Name=tinderbox lock screen
+   Exec=$HOME/.local/bin/tinderbox-lock
+   DESKTOP
+   ```
+
+   With i3 or another bare window manager, add `exec ~/.local/bin/tinderbox-lock` to its config instead.
+
+4. **GNOME only:** turn off GNOME's own lock screen, so it doesn't lock over xsecurelock, and point the lock shortcut at the session lock:
+
+   ```sh
+   gsettings set org.gnome.desktop.lockdown disable-lock-screen true
+   gsettings set org.gnome.desktop.session idle-delay 0   # Settings › Power › Screen Blank: Never
+   ```
+
+   Then in *Settings › Keyboard › View and Customize Shortcuts*:
+   - under *System*, disable *Lock Screen*;
+   - under *Custom Shortcuts*, add `loginctl lock-session` on `Super+L`.
+
+   To undo all of this, run `gsettings reset` on the same two keys, delete the autostart file, and restore the shortcut.
+
+5. Log out and back in.
+
+By default xsecurelock blanks the screen after 10 minutes, and `tinderbox-lock` turns that off so the fire keeps going. To blank eventually and save power, set `XSECURELOCK_BLANK_TIMEOUT` to a number of seconds before starting `tinderbox-lock`. Other xsecurelock settings (`XSECURELOCK_*`, see `man xsecurelock`) pass through.
+
+### xscreensaver
+
+Add tinderbox to the `programs:` list in `~/.xscreensaver`, then pick it in `xscreensaver-settings`:
+
+```
+programs:                                                   \
+  "tinderbox"   tinderbox --saver --root                  \n\
+```
+
+xscreensaver's `--root` is accepted and ignored. tinderbox draws into whatever window `XSCREENSAVER_WINDOW` names.
+
 ## Run
 
-Needs rustup (the toolchain is pinned in `rust-toolchain.toml`) and, for the web, [trunk](https://trunkrs.dev) (`cargo install trunk --locked`).
+To build from source, you need rustup (the toolchain is pinned in `rust-toolchain.toml`) and, for the web, [trunk](https://trunkrs.dev) (`cargo install trunk --locked`).
 
 ```sh
 cargo run --release                     # span every monitor, fullscreen
