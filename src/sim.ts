@@ -8,6 +8,8 @@ export interface RenderOptions {
   /** Falls back to flat until the renderer's atlas has loaded. */
   renderer: Renderer;
   wrap: boolean;
+  /** Dual grid: draw each cell as a grove×grove stand of trees. */
+  grove: number;
   /** How far through the current step, 0 to 1. Drives transitions. */
   progress: number;
   /** Seconds. Drives flicker. */
@@ -25,6 +27,8 @@ interface Buffer {
   tex: WebGLTexture;
   fbo: WebGLFramebuffer;
 }
+
+const MIN_GROVE_PX = 6;
 
 type Uniforms = Record<string, WebGLUniformLocation | null>;
 
@@ -56,7 +60,7 @@ export class ForestFire {
     this.dualProg = link(gl, fullscreenVert, dualFrag);
     this.stepU = uniforms(gl, this.stepProg, ['uState', 'uSeed', 'uGrowth', 'uLightning', 'uMoore', 'uWrap']);
     this.flatU = uniforms(gl, this.flatProg, ['uState', 'uCellPx', 'uGridLines']);
-    this.dualU = uniforms(gl, this.dualProg, ['uState', 'uTiles', 'uCellPx', 'uGridLines', 'uWrap', 'uProgress', 'uTime']);
+    this.dualU = uniforms(gl, this.dualProg, ['uState', 'uTiles', 'uCellPx', 'uGrove', 'uGridLines', 'uWrap', 'uProgress', 'uTime']);
     this.vao = gl.createVertexArray()!;
   }
 
@@ -155,6 +159,8 @@ export class ForestFire {
       gl.uniform1i(u.uWrap, o.wrap ? 1 : 0);
       gl.uniform1f(u.uProgress, o.progress);
       gl.uniform1f(u.uTime, o.time);
+      // Below a few pixels a sub-cell is just blur.
+      gl.uniform1i(u.uGrove, Math.max(1, Math.min(o.grove, Math.floor(this.cellPx / MIN_GROVE_PX))));
     }
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

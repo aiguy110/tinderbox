@@ -16,6 +16,8 @@ export interface Params {
   /** Toroidal edges. */
   wrap: boolean;
   gridLines: boolean;
+  /** Dual grid: trees per cell side. */
+  grove: number;
   /** Flat colors or dual-grid tiles (docs/PLAN.md). */
   renderer: Renderer;
   paused: boolean;
@@ -31,6 +33,7 @@ export const defaults: Params = {
   moore: false,
   wrap: true,
   gridLines: true,
+  grove: 3,
   renderer: 'dual',
   paused: false,
   panelHidden: false,
