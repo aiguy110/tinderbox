@@ -1,5 +1,5 @@
 import { type TileAtlas, uploadAtlas } from './atlas';
-import { Cause, MAX_STRIKES, hashf, State, dualFrag, flatFrag, fullscreenVert, stepFrag } from './shaders';
+import { Cause, MAX_STRIKES, SETTLED, hashf, State, dualFrag, flatFrag, fullscreenVert, stepFrag } from './shaders';
 
 export type Renderer = 'flat' | 'dual';
 
@@ -8,8 +8,8 @@ export interface RenderOptions {
   /** Falls back to flat until the renderer's atlas has loaded. */
   renderer: Renderer;
   wrap: boolean;
-  /** Dual grid: draw each cell as a grove×grove stand of trees. */
-  grove: number;
+  /** Steps for burnt ground to green back over. */
+  regrow: number;
   /** How far through the current step, 0 to 1. Drives transitions. */
   progress: number;
   /** Seconds. Drives flicker. */
@@ -35,7 +35,6 @@ interface Buffer {
   fbo: WebGLFramebuffer;
 }
 
-const MIN_GROVE_PX = 6;
 /**
  * Lightning strikes per second that get a bolt. Strikes are split between a
  * short list picked here (so we know where they land) and the rest, which the
@@ -72,8 +71,8 @@ export class ForestFire {
     this.flatProg = link(gl, fullscreenVert, flatFrag);
     this.dualProg = link(gl, fullscreenVert, dualFrag);
     this.stepU = uniforms(gl, this.stepProg, ['uState', 'uSeed', 'uGrowth', 'uLightning', 'uMoore', 'uWrap', 'uStrikes', 'uStrikeCount']);
-    this.flatU = uniforms(gl, this.flatProg, ['uState', 'uCellPx', 'uGridLines']);
-    this.dualU = uniforms(gl, this.dualProg, ['uState', 'uTiles', 'uCellPx', 'uGrove', 'uGridLines', 'uWrap', 'uProgress', 'uTime']);
+    this.flatU = uniforms(gl, this.flatProg, ['uState', 'uCellPx', 'uGridLines', 'uRegrow']);
+    this.dualU = uniforms(gl, this.dualProg, ['uState', 'uTiles', 'uCellPx', 'uGridLines', 'uRegrow', 'uWrap', 'uProgress', 'uTime']);
     this.vao = gl.createVertexArray()!;
   }
 
@@ -197,6 +196,7 @@ export class ForestFire {
     gl.uniform1i(u.uState, 0);
     gl.uniform1f(u.uCellPx, this.cellPx);
     gl.uniform1i(u.uGridLines, o.gridLines && this.cellPx >= 6 ? 1 : 0);
+    gl.uniform1f(u.uRegrow, Math.max(1, o.regrow));
     if (dual) {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, dual);
@@ -204,8 +204,6 @@ export class ForestFire {
       gl.uniform1i(u.uWrap, o.wrap ? 1 : 0);
       gl.uniform1f(u.uProgress, o.progress);
       gl.uniform1f(u.uTime, o.time);
-      // Below a few pixels a sub-cell is just blur.
-      gl.uniform1i(u.uGrove, Math.max(1, Math.min(o.grove, Math.floor(this.cellPx / MIN_GROVE_PX))));
     }
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -265,6 +263,7 @@ function seedData(w: number, h: number, density: number): Uint8Array {
   const data = new Uint8Array(w * h * 4);
   for (let i = 0; i < w * h; i++) {
     if (Math.random() < density) data[i * 4] = data[i * 4 + 1] = State.TREE;
+    else data[i * 4 + 3] = SETTLED;
   }
   return data;
 }

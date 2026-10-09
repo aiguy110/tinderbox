@@ -1,20 +1,28 @@
 // Cell state lives in an RGBA8UI texture, one texel per cell:
 //   R = current state, G = previous state, B = cause of the last transition,
-//   A = for SPREAD, a bitmask of the neighbors that were burning (see Neighbor).
+//   A = for FIRE, a bitmask of the neighbors that were burning when it caught
+//       (see Neighbor); for EMPTY, and for a tree that just grew, steps since
+//       the ground was cleared by fire (saturating at 255).
 // A fire lasts two steps (catching, then burning), leaves a burnt stand for
-// one step, and then clears to empty ground.
-// Keeping (prev, cause, sources) alongside the state means a renderer can pick
-// the right transition animation per cell without any extra bookkeeping.
+// one step, and then clears to bare dirt, which greens back over a few steps.
+// Keeping (prev, cause, A) alongside the state means a renderer can pick the
+// right transition animation per cell without any extra bookkeeping.
 
 /** Lightning strikes per step whose cells are picked on the CPU (see sim.ts). */
 export const MAX_STRIKES = 16;
 
 export const State = { EMPTY: 0, TREE: 1, FIRE: 2, BURNT: 3 } as const;
 export const Cause = { NONE: 0, GROW: 1, SPREAD: 2, LIGHTNING: 3, BURNOUT: 4, BURNING: 5, CLEAR: 6 } as const;
+/** Ground age of grass that has never burned. */
+export const SETTLED = 255;
 
 // Neighbor bits for the sources mask (y up).
 export const Neighbor = { W: 0, N: 1, E: 2, S: 3, SW: 4, NW: 5, NE: 6, SE: 7 } as const;
 const neighborOffsets = ['ivec2(-1, 0)', 'ivec2(0, 1)', 'ivec2(1, 0)', 'ivec2(0, -1)', 'ivec2(-1, -1)', 'ivec2(-1, 1)', 'ivec2(1, 1)', 'ivec2(1, -1)'];
+
+// Looks in the stills atlas (tools/atlas/stills.py LOOKS). A sim state maps
+// onto one look, except EMPTY, which blends from dirt to grass as it regrows.
+export const LOOKS = ['grass', 'forest', 'fire', 'burnt', 'dirt'] as const;
 
 const common = /* glsl */ `#version 300 es
 precision highp float;
@@ -33,6 +41,7 @@ const uint CAUSE_LIGHTNING = ${Cause.LIGHTNING}u;
 const uint CAUSE_BURNOUT = ${Cause.BURNOUT}u;
 const uint CAUSE_BURNING = ${Cause.BURNING}u;
 const uint CAUSE_CLEAR = ${Cause.CLEAR}u;
+const uint SETTLED = ${SETTLED}u;
 
 uint hash(uint x) {
   x ^= x >> 16; x *= 0x7feb352du;
@@ -43,6 +52,16 @@ uint hash(uint x) {
 
 uint hash3(uvec2 c, uint salt) {
   return hash(c.x ^ hash(c.y ^ hash(salt)));
+}
+
+// How far an empty cell has greened back, 0 (bare dirt) to 1 (grass), at
+// progress s through the step. uRegrow is the number of steps it takes.
+uniform float uRegrow;
+float regrowth(uvec4 t, float s) {
+  if (t.a == SETTLED) return 1.0;
+  float age = float(t.a);
+  if (t.r == EMPTY) age += s - 1.0;
+  return clamp(age / uRegrow, 0.0, 1.0);
 }
 `;
 
@@ -112,12 +131,12 @@ void main() {
   uint s = cur.r;
   uint next = s;
   uint cause = CAUSE_NONE;
-  uint sources = 0u;
+  uint a = 0u;
 
   if (s == FIRE && cur.g == TREE) {
     // Caught last step: burn for a step, keeping where the fire came from.
     cause = CAUSE_BURNING;
-    sources = cur.a;
+    a = cur.a;
   } else if (s == FIRE) {
     next = BURNT;
     cause = CAUSE_BURNOUT;
@@ -126,21 +145,25 @@ void main() {
     cause = CAUSE_CLEAR;
   } else if (s == TREE) {
     for (int i = 0; i < (uMoore ? 8 : 4); i++) {
-      if (burning(p + NEIGHBORS[i])) sources |= 1u << i;
+      if (burning(p + NEIGHBORS[i])) a |= 1u << i;
     }
-    if (sources != 0u) {
+    if (a != 0u) {
       next = FIRE;
       cause = CAUSE_SPREAD;
     } else if (struck(p) || rand(p, 0x9e3779b9u) < uLightning) {
       next = FIRE;
       cause = CAUSE_LIGHTNING;
     }
-  } else if (s == EMPTY && rand(p, 0x85ebca6bu) < uGrowth) {
+  } else if (rand(p, 0x85ebca6bu) < uGrowth) {
+    // A sapling keeps the age of the ground it grows from, to draw it.
     next = TREE;
     cause = CAUSE_GROW;
+    a = cur.a;
+  } else {
+    a = cur.a == SETTLED ? SETTLED : min(cur.a + 1u, SETTLED - 1u);
   }
 
-  outState = uvec4(next, s, cause, sources);
+  outState = uvec4(next, s, cause, a);
 }
 `;
 
@@ -162,17 +185,18 @@ void main() {
 
   vec3 c;
   if (s == TREE) {
-    c = mix(vec3(0.07, 0.30, 0.10), vec3(0.16, 0.45, 0.14), jitter);
+    c = mix(vec3(0.04, 0.20, 0.09), vec3(0.08, 0.30, 0.12), jitter);
     if (cause == CAUSE_GROW) c += vec3(0.08, 0.10, 0.02);
   } else if (s == FIRE) {
     c = mix(vec3(1.0, 0.35, 0.05), vec3(1.0, 0.75, 0.2), jitter);
     if (cause == CAUSE_LIGHTNING) c = vec3(0.85, 0.92, 1.0);
     if (cause == CAUSE_BURNING) c *= 0.7;
   } else if (s == BURNT) {
-    c = mix(vec3(0.14, 0.12, 0.11), vec3(0.20, 0.17, 0.15), jitter);
+    c = mix(vec3(0.07, 0.06, 0.05), vec3(0.11, 0.09, 0.08), jitter);
   } else {
-    c = mix(vec3(0.06, 0.05, 0.04), vec3(0.09, 0.07, 0.05), jitter);
-    if (cause == CAUSE_BURNOUT) c = vec3(0.30, 0.12, 0.06);
+    vec3 dirt = mix(vec3(0.20, 0.14, 0.09), vec3(0.24, 0.17, 0.11), jitter);
+    vec3 grass = mix(vec3(0.30, 0.52, 0.16), vec3(0.36, 0.58, 0.20), jitter);
+    c = mix(dirt, grass, regrowth(t, 1.0));
   }
 
   if (uGridLines) {
@@ -187,32 +211,24 @@ void main() {
 
 // Dual-grid renderer (docs/PLAN.md). Tiles sit on grid vertices and each
 // covers a quarter of the 4 cells around it, so a tile is chosen purely by
-// those 4 states and borders between tiles depend only on the cells they
-// pass through.
+// those 4 cells' looks and borders between tiles depend only on the cells
+// they pass through.
 //
-// Transitions are drawn here rather than generated. Over a step, each cell
-// blends per pixel from its previous look to its current one, with a weight
-// that is a function of world position: fire sweeps in from the neighbors
-// that lit it, saplings grow out from the middle, flames die out and ash
-// clears in noisy patches. A pixel mixes the tiles for every combination of
-// its 4 cells' looks, weighted multilinearly. Because the weights depend only
-// on the cell and the world position, both tiles on a shared border agree
-// and the result stays seamless.
-//
-// With uGrove = n > 1, each cell is drawn as an n×n stand of sub-cells that
-// share its state (a few are left as clearings), and the tiles are laid on
-// the sub-cell grid. The transition weights stay in cell space, so the
-// front still crosses the whole cell.
-//
-// The stills only cover {EMPTY, TREE, FIRE}; BURNT is drawn by charring the
-// trees in the TREE tile.
+// Transitions are drawn here rather than generated. At each pixel, each of
+// the 4 cells shows a blend of up to 3 looks, with weights that are a
+// function of the cell and world position: fire sweeps in from the neighbors
+// that lit it, saplings grow out from the middle, flames die out and the
+// burnt stand clears in patches, and grass creeps back over the dirt. The
+// pixel mixes the tiles for every combination of its 4 cells' looks,
+// weighted multilinearly. Because the weights depend only on the cell and
+// the world position, both tiles on a shared border agree and the result
+// stays seamless.
 export const dualFrag = /* glsl */ `${common}
 precision highp sampler2DArray;
 
 uniform usampler2D uState;
 uniform sampler2DArray uTiles;
 uniform float uCellPx;
-uniform int uGrove;
 uniform bool uGridLines;
 uniform bool uWrap;
 uniform float uProgress;
@@ -220,18 +236,21 @@ uniform float uTime;
 
 out vec4 outColor;
 
+const uint GRASS = 0u;
+const uint FOREST = 1u;
+const uint FLAMES = 2u;
+const uint CHARRED = 3u;
+const uint DIRT = 4u;
+const uint LOOKS = ${LOOKS.length}u;
+
 ivec2 gridSize;
 vec2 st, gx, gy;
-
-const float CLEARINGS = 0.2;
-// Disc weights around each corner sub-cell's center.
-vec4 own;
 
 uvec4 cellAt(ivec2 c) {
   if (uWrap) {
     c = (c + gridSize) % gridSize;
   } else if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, gridSize))) {
-    return uvec4(EMPTY, EMPTY, CAUSE_NONE, 0u);
+    return uvec4(EMPTY, EMPTY, CAUSE_NONE, SETTLED);
   }
   return texelFetch(uState, c, 0);
 }
@@ -286,152 +305,123 @@ vec2 heat(uvec4 t, float s) {
   return vec2(0.0);
 }
 
-// One cell's look at this pixel: blending from \`from\` to \`to\` by w, plus
-// the effects drawn on top.
+// Grass coverage of ground that has regrown by r: it comes back in patches
+// that spread and join.
+float grassAt(vec2 p, float r) {
+  if (r >= 1.0) return 1.0;
+  if (r <= 0.0) return 0.0;
+  float n = 0.75 * fbm(p * 2.2, 4u) + 0.25 * vnoise(p * 11.0, 16u);
+  return smoothstep(n - 0.06, n + 0.06, r * 1.4 - 0.2);
+}
+
+// One cell's look at this pixel, as up to 3 looks with weights, plus the
+// effects drawn on top.
 struct Corner {
-  uint from;
-  uint to;
-  float w;
+  uvec3 look;
+  vec3 w;
   float ember;
   float front;
   float flash;
 };
 
+Corner blend(uint a, uint b, float w) {
+  return Corner(uvec3(a, b, a), vec3(1.0 - w, w, 0.0), 0.0, 0.0, 0.0);
+}
+
 Corner corner(uvec4 t, ivec2 c, vec2 p, float s) {
-  Corner k = Corner(t.r, t.r, 0.0, 0.0, 0.0, 0.0);
   vec2 q = p - vec2(c);
   vec2 qc = clamp(q, 0.0, 1.0);
   float inside = smoothstep(-0.02, 0.02, min(min(q.x, q.y), min(1.0 - q.x, 1.0 - q.y)));
-  if (t.g == EMPTY && t.r == TREE) {
-    // Grows out from the middle of the cell.
+  if (t.r == EMPTY && t.g == BURNT) {
+    // The burnt stand falls into the ash in patches, and the embers go out.
+    float n = fbm(p * 3.0, 3u);
+    Corner k = blend(CHARRED, DIRT, smoothstep(n - 0.12, n + 0.12, s * 1.4 - 0.2));
+    k.ember = 0.6 * (1.0 - smoothstep(0.0, 0.5, s));
+    return k;
+  }
+  if (t.r == EMPTY) return blend(DIRT, GRASS, grassAt(p, regrowth(t, s)));
+  if (t.r == TREE && t.g == EMPTY) {
+    // Grows out from the middle of the cell, over whatever ground was there.
     float r = length(qc - 0.5) * 1.5 + (fbm(p * 3.0, 1u) - 0.5) * 0.4;
-    k.from = EMPTY;
-    k.w = smoothstep(r - 0.12, r + 0.12, s * 1.4 - 0.1);
-  } else if (t.g == TREE && t.r == FIRE) {
+    float w = smoothstep(r - 0.12, r + 0.12, s * 1.4 - 0.1);
+    float g = grassAt(p, regrowth(t, s));
+    return Corner(uvec3(DIRT, GRASS, FOREST), vec3((1.0 - g) * (1.0 - w), g * (1.0 - w), w), 0.0, 0.0, 0.0);
+  }
+  if (t.r == TREE) return blend(FOREST, FOREST, 0.0);
+  if (t.r == FIRE && t.g == TREE) {
     // The front crosses the cell over the step, ragged and glowing.
     float a = arrival(qc, t, c) + (fbm(p * 2.5, 2u) - 0.5) * 0.3;
     float f = s * 1.3 - 0.15;
-    k.from = TREE;
-    k.w = smoothstep(a - 0.05, a + 0.05, f);
+    Corner k = blend(FOREST, FLAMES, smoothstep(a - 0.05, a + 0.05, f));
     // Flame tongues along the front, and a warm cast on the canopy ahead.
     float rag = fbm(p * 6.0 + vec2(0.0, -2.0) * uTime, 9u);
     float d = f - a;
     k.front = inside * (exp(-pow(d / (0.03 + 0.06 * rag), 2.0)) * (0.4 + rag) + 0.35 * smoothstep(-0.3, 0.0, d) * step(d, 0.0));
     if (t.b == CAUSE_LIGHTNING) k.flash = inside * max(0.0, 1.0 - s / 0.12);
-  } else if (t.g == FIRE && t.r == BURNT) {
-    // Flames die out in patches, leaving charred trees and embers.
-    float n = fbm(p * 3.0, 3u);
-    k.from = FIRE;
-    k.w = smoothstep(n - 0.12, n + 0.12, s * 1.4 - 0.2);
-    k.ember = smoothstep(0.2, 0.6, s);
-  } else if (t.g == BURNT && t.r == EMPTY) {
-    // Ash settles and grass comes back through it.
-    float n = fbm(p * 3.0, 4u);
-    k.from = BURNT;
-    k.w = smoothstep(n - 0.12, n + 0.12, s * 1.4 - 0.2);
-    k.ember = 0.6 * (1.0 - smoothstep(0.0, 0.5, s));
+    return k;
   }
+  if (t.r == FIRE) return blend(FLAMES, FLAMES, 0.0);
+  // BURNT: flames die out in patches, leaving charred snags and embers.
+  float n = fbm(p * 3.0, 3u);
+  Corner k = blend(FLAMES, CHARRED, smoothstep(n - 0.12, n + 0.12, s * 1.4 - 0.2));
+  k.ember = smoothstep(0.2, 0.6, s);
   return k;
 }
 
 vec3 tile(uvec4 v) {
-  uint i = v.x + 3u * v.y + 9u * v.z + 27u * v.w;
+  uint i = v.x + LOOKS * (v.y + LOOKS * (v.z + LOOKS * v.w));
   return textureGrad(uTiles, vec3(st, float(i)), gx, gy).rgb;
-}
-
-// A tile for any 4 looks. BURNT corners take the TREE tile's trees, charred,
-// over the EMPTY tile's ground, scorched.
-vec3 shade(uvec4 v) {
-  bvec4 burnt = equal(v, uvec4(BURNT));
-  if (!any(burnt)) return tile(v);
-  uvec4 trees = v, bare = v;
-  for (int i = 0; i < 4; i++) {
-    if (burnt[i]) {
-      trees[i] = TREE;
-      bare[i] = EMPTY;
-    }
-  }
-  vec3 t = tile(trees);
-  vec3 g = tile(bare);
-  float canopy = smoothstep(0.06, 0.2, length(t - g));
-  float lum = dot(t, vec3(0.299, 0.587, 0.114));
-  vec3 charred = lum * vec3(0.42, 0.36, 0.32);
-  g *= 1.0 - 0.45 * dot(own, vec4(burnt));
-  return mix(g, charred, canopy);
 }
 
 void main() {
   gridSize = textureSize(uState, 0);
   vec2 p = gl_FragCoord.xy / uCellPx;
-  float n = float(uGrove);
-  vec2 ps = p * n;
-  // Bend the sub-cell grid so the stand doesn't read as an orchard. The warp
-  // is continuous, so tiles still meet.
-  if (uGrove > 1) ps += 0.4 * (vec2(vnoise(ps * 0.3, 14u), vnoise(ps * 0.3, 15u)) - 0.5) * 2.0;
-  ivec2 v = ivec2(floor(ps + 0.5));
-  vec2 uv = ps + 0.5 - vec2(v);
-  own = 1.0 - smoothstep(0.3, 0.55, vec4(length(uv), length(uv - vec2(1.0, 0.0)), length(uv - vec2(0.0, 1.0)), length(uv - vec2(1.0))));
+  ivec2 v = ivec2(floor(p + 0.5));
+  vec2 uv = p + 0.5 - vec2(v);
+  vec4 tent = corners(uv);
 
   // Atlas rows run top-down; gradients come from the continuous p so mip
   // selection doesn't spike at tile borders.
   st = vec2(uv.x, 1.0 - uv.y);
-  gx = dFdx(ps) * vec2(1.0, -1.0);
-  gy = dFdy(ps) * vec2(1.0, -1.0);
+  gx = dFdx(p) * vec2(1.0, -1.0);
+  gy = dFdy(p) * vec2(1.0, -1.0);
   float s = clamp(uProgress, 0.0, 1.0);
 
   const ivec2 offsets[4] = ivec2[4](ivec2(-1, -1), ivec2(0, -1), ivec2(-1, 0), ivec2(0, 0));
-  uvec4 from, to;
-  vec4 w, ember;
+  uvec3 looks[4];
+  vec3 ws[4];
+  vec4 ember, fire, smokes;
   float front = 0.0, flash = 0.0;
   for (int i = 0; i < 4; i++) {
-    ivec2 sub = v + offsets[i];
-    ivec2 c = ivec2(floor((vec2(sub) + 0.5) / n));
-    Corner k = corner(cellAt(c), c, p, s);
-    if (uGrove > 1) {
-      ivec2 span = gridSize * uGrove;
-      if (uWrap) sub = (sub + span) % span;
-      if (hashf(sub, 13u) < CLEARINGS) {
-        k.from = k.to = EMPTY;
-        k.ember = 0.0;
-      }
-    }
-    from[i] = k.from;
-    to[i] = k.to;
-    w[i] = k.w;
+    ivec2 c = v + offsets[i];
+    uvec4 t = cellAt(c);
+    Corner k = corner(t, c, p, s);
+    looks[i] = k.look;
+    ws[i] = k.w;
     ember[i] = k.ember;
     front += k.front;
     flash += k.flash;
-  }
-
-  // Fire light and smoke spread over whole cells, so they're weighed on the
-  // cell-scale dual grid rather than the sub-cell one.
-  ivec2 vc = ivec2(floor(p + 0.5));
-  vec4 tent = corners(p + 0.5 - vec2(vc));
-  vec4 fire, smokes;
-  for (int i = 0; i < 4; i++) {
-    vec2 h = heat(cellAt(vc + offsets[i]), s);
+    vec2 h = heat(t, s);
     fire[i] = h.x;
     smokes[i] = h.y;
   }
 
-  // Multilinear blend over the corners that are mid-transition.
+  // Multilinear blend over every combination of the corners' looks.
   vec3 c = vec3(0.0);
   float total = 0.0;
-  for (int m = 0; m < 16; m++) {
+  for (int m = 0; m < 81; m++) {
+    int r = m;
     float wt = 1.0;
     uvec4 look;
     for (int i = 0; i < 4; i++) {
-      bool hi = ((m >> i) & 1) != 0;
-      bool moving = from[i] != to[i];
-      if (hi && !moving) {
-        wt = 0.0;
-        break;
-      }
-      look[i] = hi ? to[i] : from[i];
-      if (moving) wt *= hi ? w[i] : 1.0 - w[i];
+      int j = r % 3;
+      r /= 3;
+      wt *= ws[i][j];
+      if (wt < 0.002) break;
+      look[i] = looks[i][j];
     }
     if (wt < 0.002) continue;
-    c += wt * shade(look);
+    c += wt * tile(look);
     total += wt;
   }
   c /= total;
@@ -451,7 +441,7 @@ void main() {
   float smoke = dot(tent, smokes) * smoothstep(0.35, 0.8, fbm(p * 2.0 - vec2(0.35, 0.6) * uTime, 10u));
   c = mix(c, vec3(0.32, 0.31, 0.3), 0.55 * smoke);
   float sparks = smoothstep(0.72, 0.85, vnoise(p * 14.0, 7u)) * (0.3 + 0.7 * vnoise(p * 9.0 + vec2(1.3, -0.7) * uTime * 3.0, 8u));
-  c += dot(own, ember) * charred * sparks * vec3(1.0, 0.35, 0.05) * 1.2;
+  c += dot(tent, ember) * charred * sparks * vec3(1.0, 0.35, 0.05) * 1.2;
   c = mix(c, vec3(0.85, 0.9, 1.0), 0.8 * clamp(flash, 0.0, 1.0));
 
   if (uGridLines) {

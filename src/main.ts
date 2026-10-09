@@ -110,7 +110,7 @@ function frame(now: number) {
   } else {
     debt = Math.min(1, debt + dt * Math.min(params.stepsPerSecond, PAUSED_STEPS_PER_SECOND));
   }
-  sim.render({ gridLines: params.gridLines, renderer: params.renderer, grove: params.grove, wrap: params.wrap, progress: debt, time: now / 1000 });
+  sim.render({ gridLines: params.gridLines, renderer: params.renderer, regrow: params.regrow, wrap: params.wrap, progress: debt, time: now / 1000 });
   lightning.render(now);
 
   if (now - statsAt > 250) {

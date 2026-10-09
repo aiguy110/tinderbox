@@ -127,9 +127,10 @@ def encode(p, im: Image.Image):
     return ((z - mean) / std).cpu()
 
 
-def harmonize(im: Image.Image, seed: int, strength: float) -> Image.Image:
+def harmonize(im: Image.Image, seed: int, strength: float, prompt: str = PROMPT) -> Image.Image:
     """SDEdit: hold the latents on the noised input's trajectory for the
-    first (1 - strength) of the steps, then denoise freely."""
+    first (1 - strength) of the steps, then denoise freely. Strength 1 is
+    plain text-to-image."""
     import torch
     from diffusers import FlowMatchEulerDiscreteScheduler
 
@@ -154,7 +155,7 @@ def harmonize(im: Image.Image, seed: int, strength: float) -> Image.Image:
         video=[im],
         mask=[Image.new("L", im.size, 255)],
         conditioning_scale=0.0,  # VACE control copies the input too literally
-        prompt_embeds=embed(PROMPT).to("cuda"),
+        prompt_embeds=embed(prompt).to("cuda"),
         negative_prompt_embeds=embed(NEGATIVE).to("cuda"),
         height=W,
         width=W,

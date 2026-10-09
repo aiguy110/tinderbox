@@ -1,3 +1,5 @@
+import { LOOKS } from './shaders';
+
 /** Upload an atlas as a mipmapped RGBA8 texture array. */
 export function uploadAtlas(gl: WebGL2RenderingContext, atlas: { tile: number; layers: number; pixels: Uint8Array }): WebGLTexture {
   const tex = gl.createTexture()!;
@@ -22,14 +24,15 @@ function rng(seed: number) {
 
 // --- Dual-grid stills ---------------------------------------------------------
 //
-// `atlas/tiles.json` + `tiles.png` (written by tools/atlas): 81 vertex tiles,
-// one per (SW, SE, NW, NE) combination of {EMPTY, TREE, FIRE}, laid out
-// row-major in a 9x9 grid so that grid index = SW + 3·SE + 9·NW + 27·NE.
+// `atlas/stills.json` + `stills.png` (written by tools/atlas/stills.py): one
+// vertex tile per (SW, SE, NW, NE) combination of the looks, laid out
+// row-major in a K²×K² grid so that grid index = SW + K·SE + K²·NW + K³·NE.
 // See docs/PLAN.md.
 
-export interface TilesManifest {
+export interface StillsManifest {
   version: 1;
   tile: number;
+  looks: string[];
 }
 
 export interface TileAtlas {
@@ -39,26 +42,30 @@ export interface TileAtlas {
   source: 'generated' | 'placeholder';
 }
 
-const DUAL_CONFIGS = 81;
+const K = LOOKS.length;
+const CONFIGS = K ** 4;
+const [GRASS, FIRE, BURNT, DIRT] = [0, 2, 3, 4];
 
 export async function loadTiles(): Promise<TileAtlas> {
   const base = `${import.meta.env.BASE_URL}atlas/`;
   try {
-    const res = await fetch(`${base}tiles.json`);
+    const res = await fetch(`${base}stills.json`);
     if (!res.ok) throw new Error(res.statusText);
-    const { tile }: TilesManifest = await res.json();
+    const { tile, looks }: StillsManifest = await res.json();
+    if (looks.join() !== LOOKS.join()) throw new Error(`atlas looks ${looks} don't match the renderer's`);
     const img = new Image();
-    img.src = `${base}tiles.png`;
+    img.src = `${base}stills.png`;
     await img.decode();
     const ctx = new OffscreenCanvas(img.width, img.height).getContext('2d')!;
     ctx.drawImage(img, 0, 0);
-    const pixels = new Uint8Array(DUAL_CONFIGS * tile * tile * 4);
-    for (let i = 0; i < DUAL_CONFIGS; i++) {
-      const data = ctx.getImageData((i % 9) * tile, Math.floor(i / 9) * tile, tile, tile).data;
+    const pixels = new Uint8Array(CONFIGS * tile * tile * 4);
+    for (let i = 0; i < CONFIGS; i++) {
+      const data = ctx.getImageData((i % (K * K)) * tile, Math.floor(i / (K * K)) * tile, tile, tile).data;
       pixels.set(data, i * tile * tile * 4);
     }
-    return { tile, layers: DUAL_CONFIGS, pixels, source: 'generated' };
-  } catch {
+    return { tile, layers: CONFIGS, pixels, source: 'generated' };
+  } catch (err) {
+    console.warn('stills atlas unavailable, using placeholder:', err);
     return placeholderTiles();
   }
 }
@@ -73,7 +80,7 @@ export async function loadTiles(): Promise<TileAtlas> {
 function placeholderTiles(): TileAtlas {
   const T = 64;
   const g = new OffscreenCanvas(T, T).getContext('2d', { willReadFrequently: true })!;
-  const pixels = new Uint8Array(DUAL_CONFIGS * T * T * 4);
+  const pixels = new Uint8Array(CONFIGS * T * T * 4);
   // Corners in tile space (y down): SW, SE, NW, NE.
   const corners: [number, number][] = [
     [0, T],
@@ -81,38 +88,41 @@ function placeholderTiles(): TileAtlas {
     [0, 0],
     [T, 0],
   ];
-  for (let config = 0; config < DUAL_CONFIGS; config++) {
-    const states = [config % 3, Math.floor(config / 3) % 3, Math.floor(config / 9) % 3, Math.floor(config / 27)];
-    const each = (fn: (x: number, y: number, s: number) => void) => corners.forEach(([x, y], i) => fn(x, y, states[i]));
+  for (let config = 0; config < CONFIGS; config++) {
+    const looks = [0, 1, 2, 3].map((i) => Math.floor(config / K ** i) % K);
+    const each = (fn: (x: number, y: number, s: number) => void) => corners.forEach(([x, y], i) => fn(x, y, looks[i]));
     tileGround(g, T);
     // Fixed draw order by layer, never by cell, so overlaps resolve the same
     // way in every tile.
-    each((x, y, s) => s === 0 && tileAsh(g, x, y, T));
-    each((x, y, s) => s === 2 && tileGlow(g, x, y, T));
-    each((x, y, s) => s !== 0 && tileCanopy(g, x, y, T, s === 2));
-    each((x, y, s) => s === 2 && tileFlames(g, x, y, T));
+    each((x, y, s) => (s === DIRT || s === BURNT) && tileDirt(g, x, y, T));
+    each((x, y, s) => s === FIRE && tileGlow(g, x, y, T));
+    each((x, y, s) => s !== GRASS && s !== DIRT && tileCanopy(g, x, y, T, s === BURNT));
+    each((x, y, s) => s === FIRE && tileFlames(g, x, y, T));
     pixels.set(g.getImageData(0, 0, T, T).data, config * T * T * 4);
   }
-  return { tile: T, layers: DUAL_CONFIGS, pixels, source: 'placeholder' };
+  return { tile: T, layers: CONFIGS, pixels, source: 'placeholder' };
 }
 
 function tileGround(g: OffscreenCanvasRenderingContext2D, T: number) {
   g.globalCompositeOperation = 'source-over';
-  g.fillStyle = '#2b2217';
+  g.fillStyle = '#4e7a2a';
   g.fillRect(0, 0, T, T);
   // Speckles drawn with wraparound, so the ground tiles with itself.
   const r = rng(5);
   for (let i = 0; i < 30; i++) {
     const x = r() * T;
     const y = r() * T;
-    g.fillStyle = r() < 0.5 ? '#372b1c' : '#211a11';
+    g.fillStyle = r() < 0.5 ? '#5a8a30' : '#3f6a22';
     for (const dx of [-T, 0, T]) for (const dy of [-T, 0, T]) g.fillRect(x + dx, y + dy, 2, 2);
   }
 }
 
-function tileAsh(g: OffscreenCanvasRenderingContext2D, cx: number, cy: number, T: number) {
+function tileDirt(g: OffscreenCanvasRenderingContext2D, cx: number, cy: number, T: number) {
+  // The cell's own quarter of the tile.
+  g.fillStyle = '#33261a';
+  g.fillRect(cx - T / 2, cy - T / 2, T, T);
   const r = rng(17);
-  g.fillStyle = 'rgba(70,64,58,0.8)';
+  g.fillStyle = 'rgba(90,84,78,0.8)';
   for (let i = 0; i < 18; i++) {
     const a = r() * 2 * Math.PI;
     const d = Math.sqrt(r()) * T * 0.35;

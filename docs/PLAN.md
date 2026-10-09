@@ -6,12 +6,17 @@ Living document. Update it as you go (see CLAUDE.md): tick milestones, record de
 
 Render each cell with diffusion-generated art that is seamless in **space**: adjacent tiles share their border pixels exactly. It must also be seamless in **time**: what a tile shows at the end of a step is exactly what the next step starts from. Orientation must come from the actual neighbor configuration. No rotating or mirroring a canonical sprite to force a match. Target playback is roughly 3–5 s per sim step.
 
-The user also wants (2026-10-08): a **forest stand per cell** rather than a single tree, fire that visibly **enters from the side it came from**, a step of **plain burning**, and a **burnt stand for one step** before the cell returns to grass.
+The user also wants (2026-10-08): a **forest stand per cell** rather than a single tree, fire that visibly **enters from the side it came from**, a step of **plain burning**, and a **burnt stand for one step** before the cell returns to grass. They clarified afterwards:
+- Forest cells should be **uniform pine forest**, drawn by new art, not by tiling single-tree stills into sub-cell groves. Groves were removed.
+- A burnt cell becomes **charred dirt** that turns back into **lush grass gradually, over about 10 steps**. The regrowth can be procedural, and few keyframes are needed.
+
+**Direction as of 2026-10-09:** the five-look diffusion stills (M4) didn't work out (see *M4 attempt*). The next session explores a **100% procedural, shader-heavy renderer**, with no generated art.
 
 ## Status
 
 - **v0, per-cell sprites (done, removed from the app).** One clip per cell transition, rotated toward a burning neighbor, generated with Wan2.1-VACE-1.3B first/last-frame interpolation between three keyframes. Spatial seams were obvious. Only `tools/atlas/generate.py` remains; `tiles.py` still uses its keyframes in `work/keyframes/`.
-- **v1, dual-grid tiles (in progress).** Generated stills, with transitions drawn by the shader. Described below.
+- **v1, dual-grid tiles (in progress).** Stills per vertex configuration, with transitions drawn by the shader. Described below. The renderer and sim are ready for five looks; there is no five-look atlas, so the app currently draws the **procedural placeholder** tiles (`placeholderTiles` in `src/atlas.ts`).
+- **v2, fully procedural (next).** See *Next steps*.
 
 ## v1 design: dual grid
 
@@ -31,7 +36,9 @@ Tiles are centered on grid **vertices**, not cells. A tile covers one quarter of
 ### Vocabulary
 
 - **Sim states:** EMPTY, TREE, FIRE, BURNT. A tree that catches is FIRE for two steps (catching, then burning; it spreads during both), then BURNT for one step, then EMPTY. The step shader keys this off the previous state in G (FIRE with prev TREE → keep burning).
-- **Stills (step boundaries):** generated for {EMPTY, TREE, FIRE} only, so K=3 and there are 3⁴ = **81 stills**. BURNT is drawn by charring the TREE tile (see *Shader transitions*).
+- **Ground age:** for EMPTY cells, A holds the steps since the ground burned. It's 0 on the CLEAR step and counts up to 254; 255 (`SETTLED`) means it never burned, and seeding and off-grid cells use it. A sapling (EMPTY→TREE) keeps the age of the ground it grew from, so the renderer can draw what it grows over. The rule ignores the age; it's for drawing only.
+- **Looks:** the atlas is indexed by look, not by state: `grass, forest, fire, burnt, dirt` (K=5, 5⁴ = **625 stills**, `LOOKS` in `src/shaders.ts`, which must match `tools/atlas/stills.py`). TREE→forest, FIRE→fire, BURNT→burnt. EMPTY blends dirt→grass by regrowth = age / `uRegrow` (the Regrowth slider, default 10 steps).
+- **M2 stills (superseded):** {EMPTY, TREE, FIRE}, K=3, 81 stills, in `tiles.png`. The current renderer no longer reads them.
 - **Clips (parked):** M3 generated one clip per transition configuration, with each cell playing one of {empty, tree, grow, catch, burnout}: K=5, 5⁴ = **625 clips**. They're no longer played; see *Why transitions moved to the shader*.
   - Spread and lightning are both "catch". A cell's own corner piece is shared by all 4 tiles around it, so it can't depend on where the fire came from anyway; direction can only show in strips and tile interiors. Splitting them would mean 1296 clips for a lightning flash.
   - A clip's first frame is the still of the previous states and its last frame is the still of the current states, which gives time continuity.
@@ -52,9 +59,11 @@ Over a step each cell blends, per pixel, from its previous look to its current o
 - **Burning:** FIRE stills, with flames that flicker (a color-keyed mask times scrolling noise).
 - **Burn-down** (FIRE→BURNT) and **clear** (BURNT→EMPTY) happen in noisy patches. Embers sparkle on charred wood.
 - **Grow:** the TREE look spreads out from the middle of the cell.
-- **BURNT look:** the TREE tile's canopy (where it differs from the EMPTY tile), desaturated and darkened, over EMPTY ground that's scorched in a disc.
-- **Fire light and smoke** are bilinear over the cell-scale dual grid.
-- **Groves:** with `grove` = n > 1, tiles are laid on an n×n sub-cell grid. Sub-cells share their cell's state, a fifth are clearings (hashed), and a low-frequency warp bends the sub-grid so it doesn't read as an orchard. Transition weights stay in cell space, so a front crosses a whole stand. It's capped so that sub-cells are at least 6 px.
+- **Clear:** BURNT→EMPTY blends the burnt look to dirt in patches.
+- **Regrow:** an EMPTY cell blends dirt→grass. The grass coverage at a pixel is a noise threshold (`grassAt`) on regrowth, which moves from (age−1)/R to age/R over the step. Grass comes back in patches that spread and join, and is continuous in time.
+- **Up to 3 looks per corner.** A sapling on half-regrown ground is dirt, grass and forest at once. So each corner carries 3 looks with weights, and the blend loops over 3⁴ = 81 combinations, skipping zero weights (usually 1 lookup).
+- **Fire light and smoke** are bilinear over the dual grid.
+- **Removed:** groves (n×n sub-cells per cell) and the charred-TREE stand-in for BURNT, both replaced by real looks.
 
 ### Lightning bolts (`src/lightning.ts`)
 
@@ -104,16 +113,36 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - [x] **M2: generated stills** (first cut). `tools/atlas/tiles.py` writes a 96 px 9×9 atlas, and it renders seamlessly in the dual renderer. Known blemishes: faint green flecks on some ground tiles, left from cells where the model drew something atypical. The art style is inherited from the photoreal-ish v0 keyframes.
 - [x] **M3: generated clips** (first cut, parked; the playback code was removed, and the generator still targets the old 3-state sim). `clips.py` makes 625 clips × 17 frames (14 worlds, about 2.5 min each); `loadClips` and `transition()`/`clipFrame()` in `dualFrag` play them over the step, and the stats line says "+ clips" when they've loaded. Checked in the browser: saplings grow, ignitions and burnouts play, and the tiles join. Known blemishes: burnout is smoky and mushy mid-clip, fire direction across edges isn't clearly legible, and the faint green fleck is still in the ground.
 - [x] **M3b: shader transitions.** Two-step fire, a BURNT state, directional fronts, flicker, embers, smoke and fire light, plus groves. The v0 renderer is removed from the app. Checked in the browser at 80 px and 24 px cells.
-- [ ] **M4: forest stills.** Regenerate the stills with a dense canopy per cell and a real BURNT state: 4⁴ = **256 stills**, so the shader's charring and groves become optional.
+- [~] **M4: forest stills (attempted, on hold).** The renderer side is done: five looks, ground age and regrowth, a Regrowth slider, and groves and the charring removed. Generation in `tools/atlas/stills.py` produced good key textures, but no harmonize strength gave usable worlds. See *M4 attempt*.
+- [ ] **M4b: procedural renderer.** Draw all five looks in the shader, with no atlas.
 - [ ] **M5: polish.** README/screenshots; delete `clips.py`/`generate.py` once nothing needs them.
+
+## M4 attempt: five-look stills (`tools/atlas/stills.py`)
+
+The M2 recipe with five looks, so 625 configurations:
+
+1. **Keys.** One 512² texture per look, cropped to 192 px and scaled to one 96 px cell (pine crowns about 20 px), then made periodic with period C. The texture is cross-faded near the edges with itself shifted by half a period, so runs of one look are seamless in the collage. Results are in `work/stills/keys/`. They're good:
+   - forest, grass and dirt are text-to-image;
+   - fire and burnt are SDEdits of the forest key (same trees), after a pixel-space prep. Without the prep the model keeps the canopy green: plain SDEdit at 0.75–0.8 gave a perspective forest, or a few flames on a green canopy. `prepare()` paints orange blobs for `ignite`, and for `char` turns crowns black and gaps to ash.
+   - Prompt lessons: "aerial drone photo looking straight down at a lawn" gives top-down grass, where "meadow" gave side-on blades. Burnt needs "charred crowns seen from directly above", or the model draws perspective snags.
+2. **Worlds.** A greedy cover of 6 non-wrapping 12×12 worlds that contain all 625 configs (`work/stills/worlds.json`).
+3. **Collage.** Each cell shows its look's periodic texture in a ragged mask grown by a per-look margin. Layer order is grass, dirt, burnt, forest, fire.
+4. **Harmonize** (`tiles.harmonize`, one SDEdit pass per world). **This is where it failed:**
+   - 0.6 and 0.5 ignore the layout: a perspective forest scene, burnt cells turned to dirt or forest, fire cells turned green.
+   - 0.4 keeps the layout but stays soft and blocky (square forest patches), and the periodic cross-fade shows as diagonal streaks in fire cells.
+   - Probes are in `work/stills/probe_s0.{4,5,6}.jpg`. The stitch and pack stages are written but have never run.
+   - Untried ideas: a more natural collage (ragged canopy edges with shadows, less periodic textures) at about 0.5; or inpainting that keeps cell interiors and repaints only borders.
 
 ## Next steps
 
-1. Get the user's verdict on the lightning bolts (look, duration, bolts per second).
-1. Get the user's verdict on the shader transitions and groves in motion (3–5 s per step, cells ≥ 24 px). Tune timing and strength: the front's glow, burn-down patches, embers and smoke.
-2. M4, forest stills: keyframes for a dense stand of canopy (trees overlapping, filling the cell), a burning stand and a burnt stand, then `tiles.py` with K=4 (256 configs, 16×16 atlas). Update `loadTiles`/`DUAL_CONFIGS`, and drop the charred-TREE stand-in in `shade()` once BURNT tiles exist. Image model only; video isn't needed.
-3. Optional: a short seamless flicker loop for burning tiles from the video model, if the shader flicker isn't enough.
-4. Format reference (read by `loadTiles`): stills are `tiles.json` `{"version": 1, "tile": N}` + `tiles.png`, a 9×9 grid with index = SW + 3·SE + 9·NW + 27·NE, rows top-down.
+1. **Explore a 100% procedural, shader-heavy renderer** (the user's call, 2026-10-09). The dual grid stays useful as structure: per-vertex blending and corner weights from world position keep things seamless. But every look is drawn in GLSL, with no atlas:
+   - pine crowns as jittered star/cone sprites per sub-cell, shaded, with shadows;
+   - grass and dirt as noise;
+   - charred snags, flames and embers.
+   The current `corner()` weights (directional front, burn-down patches, regrowth) can stay as they are; only `tile(look)` needs replacing with a procedural `look(id, p)`. Corners would then blend procedural looks evaluated at world position, so seams vanish without tiles. Keep the flat renderer and placeholder as fallbacks.
+2. Then tune timing and strength in motion (3–5 s per step, cells ≥ 24 px).
+3. Format reference, in case stills come back: `stills.json` `{"version": 1, "tile": N, "looks": [...]}` + `stills.png`, a K²×K² grid with index = SW + K·SE + K²·NW + K³·NE, rows top-down. `loadTiles` rejects an atlas whose `looks` don't match `LOOKS`.
+4. Get the user's verdict on the lightning bolts (look, duration, bolts per second).
 
 ## Open questions
 
@@ -126,7 +155,7 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - **GPU:** RTX 3080, 10 GB, shared through turnstile (`tools/atlas/turnstile.py`). Without `TURNSTILE_API_KEY` the generator queues at priority 0.
 - **Text encoder:** UMT5-XXL is about 11 GB in bf16 and doesn't fit on the GPU. `generate.py` encodes prompts on the CPU (`embed()`) and loads the pipeline with `text_encoder=None`.
 - **IPv6** to Hugging Face times out on bifrost. Download weights once with IPv4 forced (patch `socket.getaddrinfo` to `AF_INET` and set `HF_HUB_DISABLE_XET=1`), then run with `HF_HUB_OFFLINE=1`. The weights (~23 GB) are already cached.
-- **Max world size:** 1152² single-frame VACE fits the 3080; 1536² fails (`CUSOLVER_STATUS_INTERNAL_ERROR`, really OOM). A world pass takes about 100 s including model load.
+- **Max world size:** 1152² single-frame VACE fits the 3080; 1536² fails (`CUSOLVER_STATUS_INTERNAL_ERROR`, really OOM). A world pass takes about 100 s including model load. As of 2026-10-09 the 1152² VAE decode also OOMs (asks for 486 MiB with 173 free) unless run with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
 - **Wan's comfortable scale:** trees about 100–150 px across. At 64 px cells it draws mush.
 - **Video pass:** 768² × 17 frames fits in 10 GB only with `vae.enable_tiling()`, since the fp32 VAE encode runs out of memory otherwise. At about 3.6 s per step, a world takes about 2.5 min including load.
 - **Live app:** `tinderbox-build.service` (user unit, `tools/systemd/`) runs `vite build --watch` in the main checkout. Tailscale serves `dist/` at `https://bifrost.tail2280a0.ts.net:8451/`. It replaced the old :5191 dev-server unit on 2026-10-08. See CLAUDE.md.
@@ -141,3 +170,4 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - **2026-10-08 (evening):** M3 started. A plain SDEdit video pass repaints the ground over the clip (smooth at frame 0, rocky by frame 16); VACE keep-frames at both ends, set to the still worlds, fix it.
 - **2026-10-08 (night):** M3 first cut: 625 clips, played back in the dual renderer. A clean-soil ground keyframe made the stills drift (see *What didn't work*), so the old ground stays. Stills now stitch with per-pixel-median leaders. The dev server became a systemd unit. bifrost rebooted mid-run once; jobs launched without `setsid` die with their session.
 - **2026-10-08 (late night):** The user asked for forest stands, directional fire entry, a burning step and a burnt step. Per-config clips with direction would be about 10,000 clips, so transitions moved to the shader (M3b): world-space blend weights over the stills, multilinear across a tile's corners. Groves (n×n sub-cells per cell) give a stand of trees without new art; real forest stills are M4.
+- **2026-10-08/09 (night):** The user clarified: real pine-forest art, not groves, and charred dirt greening back over about 10 steps. Built five looks, ground age in A, regrowth in the shader, and `stills.py`. Keys came out well after pixel-space prep for fire and burnt; harmonize at 0.4/0.5/0.6 didn't give usable worlds (see *M4 attempt*). The live app falls back to placeholder tiles. The user's next direction: a fully procedural, shader-heavy renderer. An unsetsid'd probe died with the session; keep using `setsid nohup`.

@@ -16,7 +16,7 @@ export interface Controls {
 }
 
 interface SliderSpec {
-  key: 'cellSize' | 'grove' | 'growth' | 'lightning' | 'stepsPerSecond' | 'initialDensity';
+  key: 'cellSize' | 'regrow' | 'growth' | 'lightning' | 'stepsPerSecond' | 'initialDensity';
   label: string;
   min: number;
   max: number;
@@ -28,10 +28,10 @@ interface SliderSpec {
 
 const sliders: SliderSpec[] = [
   { key: 'cellSize', label: 'Cell size', min: 1, max: 32, step: 1, format: (v) => `${v}px` },
-  { key: 'grove', label: 'Trees per cell', min: 1, max: 4, step: 1, format: (v) => `${v}×${v}` },
   { key: 'growth', label: 'Growth p', min: -5, max: 0, step: 0.05, log: true, format: sci },
   { key: 'lightning', label: 'Lightning f', min: -8, max: -1, step: 0.05, log: true, format: sci },
   { key: 'stepsPerSecond', label: 'Speed', min: -1, max: Math.log10(480), step: 0.01, log: true, format: speed },
+  { key: 'regrow', label: 'Regrowth', min: 1, max: 30, step: 1, format: (v) => `${v} steps` },
   { key: 'initialDensity', label: 'Seed density', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%` },
 ];
 
