@@ -1,0 +1,9 @@
+[build]
+target = "index.html"
+dist = "dist"
+# Relative URLs, so the build works wherever it's served from.
+public_url = "./"
+
+[watch]
+# Only sources; trunk already skips dist/ and target/.
+watch = ["src", "index.html", "Cargo.toml", "Cargo.lock"]

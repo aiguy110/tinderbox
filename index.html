@@ -4,10 +4,27 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>tinderbox</title>
+    <link data-trunk rel="rust" data-bin="tinderbox" data-wasm-opt="s" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+        color: #e8e2da;
+        font: 13px/1.4 system-ui, sans-serif;
+      }
+      #stage {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        outline: none;
+        touch-action: none;
+      }
+    </style>
   </head>
   <body>
-    <canvas id="stage"></canvas>
-    <aside id="panel"></aside>
-    <script type="module" src="/src/main.ts"></script>
+    <canvas id="stage" tabindex="0"></canvas>
   </body>
 </html>

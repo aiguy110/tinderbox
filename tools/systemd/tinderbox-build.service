@@ -1,18 +1,20 @@
 # Keeps dist/ built from the main checkout, which tailscale serves at
-# https://bifrost.tail2280a0.ts.net:8451/. Rebuilds whenever main's sources change
-# (e.g. after a merge), so the tailnet copy stays current.
+# https://bifrost.tail2280a0.ts.net:8451/. `trunk watch` rebuilds the wasm
+# whenever main's sources change (e.g. after a merge), so the tailnet copy
+# stays current.
 # Installed with: systemctl --user link ~/Projects/tinderbox/tools/systemd/tinderbox-build.service
 #                 systemctl --user enable --now tinderbox-build
-# Uses the fnm default node, so it follows `fnm default` upgrades.
+# cargo goes through rustup, which picks the toolchain in rust-toolchain.toml.
 
 [Unit]
 Description=tinderbox build watcher (dist/ for the tailnet)
 
 [Service]
 WorkingDirectory=%h/Projects/tinderbox
-ExecStart=%h/.local/share/fnm/aliases/default/bin/node node_modules/vite/bin/vite.js build --watch
+Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.cargo/bin/trunk watch --release
 Restart=on-failure
-RestartSec=3
+RestartSec=5
 
 [Install]
 WantedBy=default.target

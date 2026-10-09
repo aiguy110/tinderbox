@@ -1,6 +1,6 @@
 # tinderbox
 
-A full-screen WebGL2 [Drossel–Schwabl forest-fire model](https://en.wikipedia.org/wiki/Forest-fire_model).
+A full-screen GPU [Drossel–Schwabl forest-fire model](https://en.wikipedia.org/wiki/Forest-fire_model), written in Rust. It runs in the browser (WebGPU, or WebGL2) and natively, where one scene can span several monitors.
 
 Each step, every cell updates at the same time:
 
@@ -12,28 +12,39 @@ The interesting regime is f ≪ p ≪ 1. Fires then follow a power-law size dist
 
 ## Run
 
+Needs rustup (the toolchain is pinned in `rust-toolchain.toml`) and, for the web, [trunk](https://trunkrs.dev) (`cargo install trunk --locked`).
+
 ```sh
-npm install
-npm run dev
+cargo run --release                     # span every monitor, fullscreen
+cargo run --release -- --windowed       # one window
+cargo run --release -- --monitors 0,2   # only some monitors (see --list-monitors)
+cargo run --release -- --help           # also --views and headless --shot
+trunk serve                             # web build at http://localhost:8080
+trunk build --release                   # web build into dist/
 ```
+
+On several monitors the grid covers their bounding box, and each monitor shows its own part of it, so fires burn across the seams. Cells are sized in the primary monitor's logical pixels.
 
 **Controls:** use the panel to set cell size, trees per cell, p, f, speed, regrowth time, seed density, neighborhood, edge wrap, and day or night. The scene renderer wants big, slow cells: try 48–96 px and 3–5 s per step. Keys:
 
 - `H` or the × / ☰ buttons hide and show the panel
-- `F` toggles fullscreen
+- `F` toggles fullscreen (web and `--windowed`)
 - `Space` pauses
 - `.` steps once
+- `Esc` quits (native)
 
-Click or drag on the canvas to start fires. Settings, including whether the panel is hidden, are saved in localStorage.
+Click or drag to start fires. Settings, including whether the panel is hidden, are saved (localStorage on the web, `~/.config/tinderbox/params.json` natively).
 
 ## Layout
 
-- `src/shaders.ts`: GLSL for the update rule and the flat and dual-grid renderers, plus the state and cause encoding
-- `src/scene.ts`: the procedural scene renderer (the default)
-- `src/atlas.ts`: loading the dual-grid tile atlas, and the procedural placeholder used when there isn't one
-- `src/sim.ts`: ping-pong framebuffer simulation, resizing, and ignition
-- `src/controls.ts`, `src/params.ts`: the parameter panel and its saved settings
-- `src/main.ts`: the frame loop, input handling, and fullscreen
+- `src/shaders/*.wgsl`: the update rule (`step`), the procedural scene (`scene`, the default), flat colors (`flat`), lightning bolts and the upscaling blit. `src/shaders.rs` assembles them with the state constants
+- `src/sim.rs`: ping-pong simulation, resizing, ignition, and reading back where lightning struck
+- `src/render.rs`: drawing one view: scene at the adaptive resolution, bolts, then up to the screen
+- `src/engine.rs`: the layout, step timing, adaptive resolution and input-to-cell mapping, independent of windows
+- `src/app.rs`: windows (canvas, desktop window, or one per monitor), surfaces, input and the frame loop
+- `src/ui.rs`, `src/input.rs`, `src/params.rs`: the egui panel, its input, and saved settings
+- `src/lightning.rs`: bolt geometry and drawing
+- `src/shot.rs`: headless rendering of a virtual monitor layout to PNG (`--shot`)
 
 ## State encoding
 
@@ -60,12 +71,11 @@ The default renderer draws everything in the fragment shader, with no art assets
 
 ## Dual-grid tiles
 
-The tiles renderer draws tiles centered on grid vertices, so neighboring tiles always join. Each tile is one combination of five looks (grass, pine forest, burning forest, burnt stand, dirt) at its four corners. Transitions are drawn by the shader: fire sweeps in from the neighbors that lit it, burns, dies down to a charred stand, clears to dirt, and grass creeps back. The design and the generator (`tools/atlas/stills.py`) are described in [docs/PLAN.md](docs/PLAN.md).
-
-If `atlas/stills.{png,json}` exists in the data dir (`$TINDERBOX_DATA`, default `~/.local/share/tinderbox`) it's used; `vite.config.ts` serves it in dev and copies it into `dist/` on build. Otherwise a procedural placeholder is drawn at startup. **That's currently always the case:** generating the five-look atlas didn't work out (see the plan), and the next step is a fully procedural renderer.
+An earlier renderer drew tiles centered on grid vertices, from a diffusion-generated atlas. Generating the atlas didn't work out, and the renderer was dropped in the Rust port. It's described in [docs/PLAN.md](docs/PLAN.md) and lives in git history.
 
 ## Roadmap
 
 - **Phase 1 (done):** GPU sim, flat-color renderer, adjustable parameters, fullscreen.
 - **Phase 2 (in progress):** a fully procedural scene (see [Procedural scene](#procedural-scene)). Before it: dual-grid tiles with shader-drawn transitions; diffusion-generated tiles are on hold.
+- **Rust port (done):** web and native from one crate, with multi-monitor spanning.
 - Also planned: fire-size histogram and density plots (needs GPU reduction or async readback), and painting trees and firebreaks.
