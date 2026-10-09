@@ -18,8 +18,12 @@ export interface Params {
   gridLines: boolean;
   /** Steps for burnt ground to green back over. */
   regrow: number;
-  /** Flat colors or dual-grid tiles (docs/PLAN.md). */
+  /** Procedural scene, dual-grid tiles or flat colors (docs/PLAN.md). */
   renderer: Renderer;
+  /** Scene renderer: trees per cell side. */
+  trees: number;
+  /** Scene renderer: moonlight instead of daylight. */
+  night: boolean;
   paused: boolean;
   panelHidden: boolean;
 }
@@ -34,7 +38,9 @@ export const defaults: Params = {
   wrap: true,
   gridLines: true,
   regrow: 10,
-  renderer: 'dual',
+  renderer: 'scene',
+  trees: 4,
+  night: false,
   paused: false,
   panelHidden: false,
 };
@@ -44,8 +50,9 @@ const KEY = 'tinderbox:params';
 export function load(): Params {
   try {
     const p: Params = { ...defaults, ...JSON.parse(localStorage.getItem(KEY) ?? '{}'), paused: false };
-    // Saved settings may name a renderer that has since been removed.
-    if (p.renderer !== 'flat') p.renderer = 'dual';
+    // Saved settings may name a renderer that has since been removed or
+    // renamed ('dual' is now 'tiles', and the scene replaced it as default).
+    if (p.renderer !== 'flat' && p.renderer !== 'tiles') p.renderer = 'scene';
     return p;
   } catch {
     return { ...defaults };

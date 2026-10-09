@@ -10,13 +10,35 @@ The user also wants (2026-10-08): a **forest stand per cell** rather than a sing
 - Forest cells should be **uniform pine forest**, drawn by new art, not by tiling single-tree stills into sub-cell groves. Groves were removed.
 - A burnt cell becomes **charred dirt** that turns back into **lush grass gradually, over about 10 steps**. The regrowth can be procedural, and few keyframes are needed.
 
-**Direction as of 2026-10-09:** the five-look diffusion stills (M4) didn't work out (see *M4 attempt*). The next session explores a **100% procedural, shader-heavy renderer**, with no generated art.
+**Direction as of 2026-10-09:** the five-look diffusion stills (M4) didn't work out (see *M4 attempt*), so the renderer is now **100% procedural** (v2). For it, the user asked for:
+- **many individual pines per forest cell**, catching in an order set by where the fire came from;
+- **nicely animated flames** (particles if affordable);
+- **grass regrowing gradually** after a burn;
+- **saplings growing over a forest's first two steps**;
+- "any other nice touches".
 
 ## Status
 
 - **v0, per-cell sprites (done, removed from the app).** One clip per cell transition, rotated toward a burning neighbor, generated with Wan2.1-VACE-1.3B first/last-frame interpolation between three keyframes. Spatial seams were obvious. Only `tools/atlas/generate.py` remains; `tiles.py` still uses its keyframes in `work/keyframes/`.
 - **v1, dual-grid tiles (in progress).** Stills per vertex configuration, with transitions drawn by the shader. Described below. The renderer and sim are ready for five looks; there is no five-look atlas, so the app currently draws the **procedural placeholder** tiles (`placeholderTiles` in `src/atlas.ts`).
-- **v2, fully procedural (next).** See *Next steps*.
+- **v2, fully procedural (first cut, the default renderer).** `sceneFrag` in `src/scene.ts`; see *v2 design*. The tiles renderer (v1) and flat colors remain selectable.
+
+## v2 design: procedural scene (`src/scene.ts`)
+
+Everything is a function of world position p (in cells), the 4–16 nearby cell texels, the step progress s and wall time. No tiles, so there are no seams to manage. The view is **oblique**: the ground is seen from above, and pines stand up on it in profile, overlapping the trees behind.
+
+- **Tree slots.** Each cell owns an n×n jittered grid of slots (`uTrees`, the "Trees per side" slider, default 4; capped so slots are ≥ 4 px apart). 10% of slots are gaps. A slot's position, height (1.55–1.9 slot spacings) and seed are hashes of its world slot index, so a regrown forest has the same trees as before.
+- **The window.** A pixel evaluates a fixed 3×4 window of slots (its own column ±1, its row and the 3 rows below), back to front. Every tree's crown, flames (≤ 1.6 tree heights, leaning ≤ 0.15), shadow (offset right, short below) and snag tilt are sized to stay inside the slots that can see them, so nothing is clipped at window boundaries. **If you make trees taller, flames higher or shadows longer, recheck these bounds** (comment in `drawPine`).
+- **Timeline per cell** (`fireAge`): 0–1 catching, 1–2 burning, 2–3 burnt, then 3 + ground age (`groundAge` in `common`). Per tree, `tau = fireAge - ignition`. Ignition is `arrival()` at the tree's position (0.85×) plus jitter, so the stand catches in order from the burning neighbors, or outward from the strike point. Everything that depends on ignition (char, flame ramp-up, embers) saturates by the end of the catching step's worst case, so the burnt step (whose A no longer has the mask) can use ignition 0 without a jump.
+- **Fire:** flames flare up the crown (`climb`), then die back to about half height as the needles burn away (the crown is thresholded by noise rising with char, leaving trunk and branch stubs). Flames end per tree between fireAge 2.2 and 2.95. Shapes are a teardrop width profile distorted by scrolling fbm and vertical tongues, with a per-tree pulse, and composited semi-additively over the tree. Lightning flashes the tree nearest the strike.
+- **Snags:** after the burnt step, each slot's snag stands until fireAge 3.8–7.3, then tips (≤ 0.35 rad) and crumbles over 0.7 steps. A burning tree with char 1 and no flame is drawn by the same function as a standing snag, so the hand-over is exact. A sapling can grow in front of a snag.
+- **Growth:** a new cause, `MATURE`, marks a tree's second step (`stepFrag` sets it after `GROW` and keeps the ground age in A through both). Saplings grow from nothing to full size over those two steps, brighter green while young. The forest-floor litter comes in with them.
+- **Ground:** grass (regrowth), needle litter and ash amounts are computed per cell at the pixel (ash follows the front during catch), bilinearly blended between cell centers through a noise-warped lattice, then thresholded by noise, so changes come in patches. Ash washes into dirt over ~3 steps after the clear; embers glow on it through the burnt step.
+- **Sky effects** from a bilinear per-cell heat field (`heatAt`): fire light (warm, flickering; much stronger at night), smoke sampled from the heat field below the pixel and drifting with the wind, and sparks: two lattices of particles rising on the wind, each lit if there was fire where it came from and fading as it rises. Particles are evaluated in the shader, not simulated, so they cost a few hashes and one `heatAt` per layer.
+- **Wind** is a slow function of time: it sways the trees and leans flames, smoke and sparks.
+- **Night** (toggle): moonlit ambient light, with fire light and emissive flames on top.
+- **Known limitation:** a sapling that catches during its two growing steps jumps to full size, because A is the sources mask while burning and the size isn't kept. Rare at the usual p.
+- **Cost:** about 50 texel fetches per pixel plus noise, with early-outs for slots whose tree misses the pixel. Not yet measured on a real GPU (Playwright here is SwiftShader, about 1 fps at 560×360).
 
 ## v1 design: dual grid
 
@@ -51,7 +73,7 @@ Tiles are centered on grid **vertices**, not cells. A tile covers one quarter of
 3. **Stitch** (pixel space). Border pieces are keyed by what they may depend on: a corner (one state) around each cell center, and h/v strips (a pair of states) along the lines between centers. The medoid occurrence of each key is pasted over all the others with feathered weights. Corners have full weight wherever the perpendicular strips overlap, so the tile-border lines are exact functions of their cells.
 4. **Crop.** Each configuration is taken from its most typical occurrence (lowest summed per-cell deviation from that state's mean) and written to the 9×9 atlas.
 
-### Shader transitions (`dualFrag`, current)
+### Shader transitions (`dualFrag`)
 
 Over a step each cell blends, per pixel, from its previous look to its current one with a weight that is a function of **world position** and the cell's data. A pixel mixes the stills for every combination of its 4 corners' looks, weighted multilinearly (up to 16 tile lookups, usually 1). The weights depend only on the cell and the world position, so both tiles along a shared border compute the same thing and the result stays seamless.
 
@@ -114,7 +136,7 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - [x] **M3: generated clips** (first cut, parked; the playback code was removed, and the generator still targets the old 3-state sim). `clips.py` makes 625 clips × 17 frames (14 worlds, about 2.5 min each); `loadClips` and `transition()`/`clipFrame()` in `dualFrag` play them over the step, and the stats line says "+ clips" when they've loaded. Checked in the browser: saplings grow, ignitions and burnouts play, and the tiles join. Known blemishes: burnout is smoky and mushy mid-clip, fire direction across edges isn't clearly legible, and the faint green fleck is still in the ground.
 - [x] **M3b: shader transitions.** Two-step fire, a BURNT state, directional fronts, flicker, embers, smoke and fire light, plus groves. The v0 renderer is removed from the app. Checked in the browser at 80 px and 24 px cells.
 - [~] **M4: forest stills (attempted, on hold).** The renderer side is done: five looks, ground age and regrowth, a Regrowth slider, and groves and the charring removed. Generation in `tools/atlas/stills.py` produced good key textures, but no harmonize strength gave usable worlds. See *M4 attempt*.
-- [ ] **M4b: procedural renderer.** Draw all five looks in the shader, with no atlas.
+- [x] **M4b: procedural renderer** (first cut). `sceneFrag`: individual pines, per-tree ignition, flames, snags, sparks, smoke, regrowth, two-step growth, night. Checked in the browser (SwiftShader) at 64 px cells through catch, burn, burnt, clear, regrowth and saplings, by day and night. Needs tuning in motion on a real GPU.
 - [ ] **M5: polish.** README/screenshots; delete `clips.py`/`generate.py` once nothing needs them.
 
 ## M4 attempt: five-look stills (`tools/atlas/stills.py`)
@@ -135,14 +157,11 @@ The M2 recipe with five looks, so 625 configurations:
 
 ## Next steps
 
-1. **Explore a 100% procedural, shader-heavy renderer** (the user's call, 2026-10-09). The dual grid stays useful as structure: per-vertex blending and corner weights from world position keep things seamless. But every look is drawn in GLSL, with no atlas:
-   - pine crowns as jittered star/cone sprites per sub-cell, shaded, with shadows;
-   - grass and dirt as noise;
-   - charred snags, flames and embers.
-   The current `corner()` weights (directional front, burn-down patches, regrowth) can stay as they are; only `tile(look)` needs replacing with a procedural `look(id, p)`. Corners would then blend procedural looks evaluated at world position, so seams vanish without tiles. Keep the flat renderer and placeholder as fallbacks.
-2. Then tune timing and strength in motion (3–5 s per step, cells ≥ 24 px).
-3. Format reference, in case stills come back: `stills.json` `{"version": 1, "tile": N, "looks": [...]}` + `stills.png`, a K²×K² grid with index = SW + K·SE + K²·NW + K³·NE, rows top-down. `loadTiles` rejects an atlas whose `looks` don't match `LOOKS`.
+1. **Get the user's verdict on the scene in motion** (64–96 px cells, 3–5 s per step), and measure fps on their GPU. If it's slow: fewer smoke/glow `heatAt` samples, or render the heat field to a small texture once per frame.
+2. Tuning candidates noticed so far: flames are still fairly uniform cones from a distance; the ground under a burning stand reads as a squarish ash patch; dirt may be too orange. Possible touches: heat shimmer above flames, scorch marks where lightning strikes, crown fire jumping between trees, birds or deer fleeing, a day/night cycle instead of a toggle.
+3. Decide whether to keep the tiles renderer and `atlas.ts` around, or delete them with `stills.py` (M5).
 4. Get the user's verdict on the lightning bolts (look, duration, bolts per second).
+5. Format reference, in case stills come back: `stills.json` `{"version": 1, "tile": N, "looks": [...]}` + `stills.png`, a K²×K² grid with index = SW + K·SE + K²·NW + K³·NE, rows top-down. `loadTiles` rejects an atlas whose `looks` don't match `LOOKS`.
 
 ## Open questions
 
@@ -161,6 +180,7 @@ The M2 recipe with five looks, so 625 configurations:
 - **Live app:** `tinderbox-build.service` (user unit, `tools/systemd/`) runs `vite build --watch` in the main checkout. Tailscale serves `dist/` at `https://bifrost.tail2280a0.ts.net:8451/`. It replaced the old :5191 dev-server unit on 2026-10-08. See CLAUDE.md.
 - **GPU queue:** the generators queue at priority 0, so a named consumer (xad-pod, 30) can hold the GPU for 15–20 minutes at a time. That's expected. Check with `curl -s localhost:8080/api/queue`.
 - **Background jobs:** launch with `setsid nohup … < /dev/null & disown`, or the job dies with the agent session. Don't detect them with `pgrep -f clips.py`, which matches the shell running pgrep itself. Use `ps -eo args | grep "[.]venv/bin/python clips.py"`.
+- **Inspecting the scene in Playwright:** WebGL there is SwiftShader, about 1 fps at 560×360; bigger viewports make screenshots time out. In dev, `window.tinderbox` has `sim`, `params`, `step()` and `setProgress(x)`: set `params.paused = true` and `params.stepsPerSecond = 0.001`, call `sim.ignite(x, y)` (CSS px), `step()` a few times, then `setProgress(0.5)` and screenshot. Saved params come from localStorage `tinderbox:params` (`paused` is never restored).
 - **Python venv:** `tools/atlas/.venv` (gitignored). Recreate it with `pip install -r tools/atlas/requirements.txt`.
 
 ## Log
@@ -171,3 +191,4 @@ The M2 recipe with five looks, so 625 configurations:
 - **2026-10-08 (night):** M3 first cut: 625 clips, played back in the dual renderer. A clean-soil ground keyframe made the stills drift (see *What didn't work*), so the old ground stays. Stills now stitch with per-pixel-median leaders. The dev server became a systemd unit. bifrost rebooted mid-run once; jobs launched without `setsid` die with their session.
 - **2026-10-08 (late night):** The user asked for forest stands, directional fire entry, a burning step and a burnt step. Per-config clips with direction would be about 10,000 clips, so transitions moved to the shader (M3b): world-space blend weights over the stills, multilinear across a tile's corners. Groves (n×n sub-cells per cell) give a stand of trees without new art; real forest stills are M4.
 - **2026-10-08/09 (night):** The user clarified: real pine-forest art, not groves, and charred dirt greening back over about 10 steps. Built five looks, ground age in A, regrowth in the shader, and `stills.py`. Keys came out well after pixel-space prep for fire and burnt; harmonize at 0.4/0.5/0.6 didn't give usable worlds (see *M4 attempt*). The live app falls back to placeholder tiles. The user's next direction: a fully procedural, shader-heavy renderer. An unsetsid'd probe died with the session; keep using `setsid nohup`.
+- **2026-10-09:** v2 first cut: the procedural scene renderer, now the default (the saved renderer `dual` migrates to `scene`; tiles are `tiles`). Added `MATURE` and a continuous `groundAge`. Lessons: low-temperature flame fragments from high-frequency noise read as black specks, so flame alpha needs a threshold; flames must fade before the slot window's edge or they get flat tops; reversed `smoothstep` edges are undefined in GLSL, so use `1 - smoothstep(lo, hi, x)`.

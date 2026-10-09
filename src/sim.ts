@@ -1,12 +1,17 @@
 import { type TileAtlas, uploadAtlas } from './atlas';
+import { sceneFrag } from './scene';
 import { Cause, MAX_STRIKES, SETTLED, hashf, State, dualFrag, flatFrag, fullscreenVert, stepFrag } from './shaders';
 
-export type Renderer = 'flat' | 'dual';
+export type Renderer = 'scene' | 'tiles' | 'flat';
 
 export interface RenderOptions {
   gridLines: boolean;
-  /** Falls back to flat until the renderer's atlas has loaded. */
+  /** Tiles fall back to flat until the atlas has loaded. */
   renderer: Renderer;
+  /** Scene renderer: trees per cell side, before the cap for small cells. */
+  trees: number;
+  /** Scene renderer: moonlight instead of daylight. */
+  night: boolean;
   wrap: boolean;
   /** Steps for burnt ground to green back over. */
   regrow: number;
@@ -57,9 +62,11 @@ export class ForestFire {
   private stepProg: WebGLProgram;
   private flatProg: WebGLProgram;
   private dualProg: WebGLProgram;
+  private sceneProg: WebGLProgram;
   private stepU: Uniforms;
   private flatU: Uniforms;
   private dualU: Uniforms;
+  private sceneU: Uniforms;
   private tiles: WebGLTexture | null = null;
   private vao: WebGLVertexArrayObject;
 
@@ -70,9 +77,11 @@ export class ForestFire {
     this.stepProg = link(gl, fullscreenVert, stepFrag);
     this.flatProg = link(gl, fullscreenVert, flatFrag);
     this.dualProg = link(gl, fullscreenVert, dualFrag);
+    this.sceneProg = link(gl, fullscreenVert, sceneFrag);
     this.stepU = uniforms(gl, this.stepProg, ['uState', 'uSeed', 'uGrowth', 'uLightning', 'uMoore', 'uWrap', 'uStrikes', 'uStrikeCount']);
     this.flatU = uniforms(gl, this.flatProg, ['uState', 'uCellPx', 'uGridLines', 'uRegrow']);
     this.dualU = uniforms(gl, this.dualProg, ['uState', 'uTiles', 'uCellPx', 'uGridLines', 'uRegrow', 'uWrap', 'uProgress', 'uTime']);
+    this.sceneU = uniforms(gl, this.sceneProg, ['uState', 'uCellPx', 'uGridLines', 'uRegrow', 'uWrap', 'uProgress', 'uTime', 'uTrees', 'uNight']);
     this.vao = gl.createVertexArray()!;
   }
 
@@ -172,7 +181,7 @@ export class ForestFire {
 
   /**
    * Where in a struck cell the fire starts, in canvas pixels (y up). Matches
-   * the lightning origin in the dual renderer's arrival().
+   * the lightning origin in the renderers' arrival().
    */
   strikePoint(s: Strike): [number, number] {
     return [(s.x + 0.3 + 0.4 * hashf(s.x, s.y, 11)) * this.cellPx, (s.y + 0.3 + 0.4 * hashf(s.x, s.y, 12)) * this.cellPx];
@@ -186,8 +195,9 @@ export class ForestFire {
   render(o: RenderOptions) {
     if (!this.buffers) return;
     const gl = this.gl;
-    const dual = o.renderer === 'dual' && this.tiles;
-    const [prog, u] = dual ? [this.dualProg, this.dualU] : [this.flatProg, this.flatU];
+    const dual = o.renderer === 'tiles' && this.tiles;
+    const scene = o.renderer === 'scene';
+    const [prog, u] = scene ? [this.sceneProg, this.sceneU] : dual ? [this.dualProg, this.dualU] : [this.flatProg, this.flatU];
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.useProgram(prog);
@@ -197,13 +207,20 @@ export class ForestFire {
     gl.uniform1f(u.uCellPx, this.cellPx);
     gl.uniform1i(u.uGridLines, o.gridLines && this.cellPx >= 6 ? 1 : 0);
     gl.uniform1f(u.uRegrow, Math.max(1, o.regrow));
+    if (dual || scene) {
+      gl.uniform1i(u.uWrap, o.wrap ? 1 : 0);
+      gl.uniform1f(u.uProgress, o.progress);
+      gl.uniform1f(u.uTime, o.time);
+    }
     if (dual) {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, dual);
       gl.uniform1i(u.uTiles, 1);
-      gl.uniform1i(u.uWrap, o.wrap ? 1 : 0);
-      gl.uniform1f(u.uProgress, o.progress);
-      gl.uniform1f(u.uTime, o.time);
+    }
+    if (scene) {
+      // Keep trees at least 4 px apart.
+      gl.uniform1i(u.uTrees, Math.max(1, Math.min(Math.round(o.trees), Math.floor(this.cellPx / 4))));
+      gl.uniform1i(u.uNight, o.night ? 1 : 0);
     }
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

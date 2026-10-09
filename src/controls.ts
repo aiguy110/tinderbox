@@ -16,7 +16,7 @@ export interface Controls {
 }
 
 interface SliderSpec {
-  key: 'cellSize' | 'regrow' | 'growth' | 'lightning' | 'stepsPerSecond' | 'initialDensity';
+  key: 'cellSize' | 'trees' | 'regrow' | 'growth' | 'lightning' | 'stepsPerSecond' | 'initialDensity';
   label: string;
   min: number;
   max: number;
@@ -27,24 +27,27 @@ interface SliderSpec {
 }
 
 const sliders: SliderSpec[] = [
-  { key: 'cellSize', label: 'Cell size', min: 1, max: 32, step: 1, format: (v) => `${v}px` },
+  { key: 'cellSize', label: 'Cell size', min: 1, max: 128, step: 1, format: (v) => `${v}px` },
   { key: 'growth', label: 'Growth p', min: -5, max: 0, step: 0.05, log: true, format: sci },
   { key: 'lightning', label: 'Lightning f', min: -8, max: -1, step: 0.05, log: true, format: sci },
   { key: 'stepsPerSecond', label: 'Speed', min: -1, max: Math.log10(480), step: 0.01, log: true, format: speed },
+  { key: 'trees', label: 'Trees per side', min: 1, max: 8, step: 1, format: (v) => `${v * v} per cell` },
   { key: 'regrow', label: 'Regrowth', min: 1, max: 30, step: 1, format: (v) => `${v} steps` },
   { key: 'initialDensity', label: 'Seed density', min: 0, max: 1, step: 0.01, format: (v) => `${Math.round(v * 100)}%` },
 ];
 
 const renderers: { value: Renderer; label: string }[] = [
-  { value: 'dual', label: 'Dual-grid tiles' },
+  { value: 'scene', label: 'Procedural scene' },
+  { value: 'tiles', label: 'Dual-grid tiles' },
   { value: 'flat', label: 'Flat colors' },
 ];
 
-const toggles: { key: 'moore' | 'wrap' | 'gridLines' | 'paused'; label: string }[] = [
+const toggles: { key: 'moore' | 'wrap' | 'gridLines' | 'night' | 'paused'; label: string }[] = [
   { key: 'paused', label: 'Paused' },
   { key: 'moore', label: '8-neighbor spread' },
   { key: 'wrap', label: 'Wrap edges' },
   { key: 'gridLines', label: 'Grid lines' },
+  { key: 'night', label: 'Night' },
 ];
 
 export function buildControls(root: HTMLElement, params: Params, h: ControlHandlers): Controls {

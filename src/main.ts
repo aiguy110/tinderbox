@@ -97,6 +97,12 @@ function stepOnce() {
   debt = 0;
 }
 
+// For poking at transitions from the console in dev: step, then set how far
+// through the step to show (with the sim paused and Speed turned right down).
+if (import.meta.env.DEV) {
+  Object.assign(window, { tinderbox: { sim, params, step: stepOnce, setProgress: (x: number) => (debt = x) } });
+}
+
 function frame(now: number) {
   const dt = Math.min(0.25, (now - last) / 1000);
   last = now;
@@ -110,13 +116,13 @@ function frame(now: number) {
   } else {
     debt = Math.min(1, debt + dt * Math.min(params.stepsPerSecond, PAUSED_STEPS_PER_SECOND));
   }
-  sim.render({ gridLines: params.gridLines, renderer: params.renderer, regrow: params.regrow, wrap: params.wrap, progress: debt, time: now / 1000 });
+  sim.render({ gridLines: params.gridLines, renderer: params.renderer, regrow: params.regrow, trees: params.trees, night: params.night, wrap: params.wrap, progress: debt, time: now / 1000 });
   lightning.render(now);
 
   if (now - statsAt > 250) {
     statsAt = now;
     controls.setStats(
-      `${sim.width}×${sim.height} cells · gen ${sim.generation.toLocaleString()} · ${fps.toFixed(0)} fps${params.renderer === 'flat' ? '' : ` · ${atlasSource} atlas`}`,
+      `${sim.width}×${sim.height} cells · gen ${sim.generation.toLocaleString()} · ${fps.toFixed(0)} fps${params.renderer === 'tiles' ? ` · ${atlasSource} atlas` : ''}`,
     );
   }
   requestAnimationFrame(frame);

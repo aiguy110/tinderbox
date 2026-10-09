@@ -1,8 +1,9 @@
 // Cell state lives in an RGBA8UI texture, one texel per cell:
 //   R = current state, G = previous state, B = cause of the last transition,
 //   A = for FIRE, a bitmask of the neighbors that were burning when it caught
-//       (see Neighbor); for EMPTY, and for a tree that just grew, steps since
-//       the ground was cleared by fire (saturating at 255).
+//       (see Neighbor); for EMPTY, and for a tree in its first two steps
+//       (causes GROW then MATURE), steps since the ground was cleared by fire
+//       (saturating at 255).
 // A fire lasts two steps (catching, then burning), leaves a burnt stand for
 // one step, and then clears to bare dirt, which greens back over a few steps.
 // Keeping (prev, cause, A) alongside the state means a renderer can pick the
@@ -12,7 +13,7 @@
 export const MAX_STRIKES = 16;
 
 export const State = { EMPTY: 0, TREE: 1, FIRE: 2, BURNT: 3 } as const;
-export const Cause = { NONE: 0, GROW: 1, SPREAD: 2, LIGHTNING: 3, BURNOUT: 4, BURNING: 5, CLEAR: 6 } as const;
+export const Cause = { NONE: 0, GROW: 1, SPREAD: 2, LIGHTNING: 3, BURNOUT: 4, BURNING: 5, CLEAR: 6, MATURE: 7 } as const;
 /** Ground age of grass that has never burned. */
 export const SETTLED = 255;
 
@@ -24,7 +25,7 @@ const neighborOffsets = ['ivec2(-1, 0)', 'ivec2(0, 1)', 'ivec2(1, 0)', 'ivec2(0,
 // onto one look, except EMPTY, which blends from dirt to grass as it regrows.
 export const LOOKS = ['grass', 'forest', 'fire', 'burnt', 'dirt'] as const;
 
-const common = /* glsl */ `#version 300 es
+export const common = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
 precision highp usampler2D;
@@ -41,6 +42,7 @@ const uint CAUSE_LIGHTNING = ${Cause.LIGHTNING}u;
 const uint CAUSE_BURNOUT = ${Cause.BURNOUT}u;
 const uint CAUSE_BURNING = ${Cause.BURNING}u;
 const uint CAUSE_CLEAR = ${Cause.CLEAR}u;
+const uint CAUSE_MATURE = ${Cause.MATURE}u;
 const uint SETTLED = ${SETTLED}u;
 
 uint hash(uint x) {
@@ -54,14 +56,22 @@ uint hash3(uvec2 c, uint salt) {
   return hash(c.x ^ hash(c.y ^ hash(salt)));
 }
 
-// How far an empty cell has greened back, 0 (bare dirt) to 1 (grass), at
-// progress s through the step. uRegrow is the number of steps it takes.
+// Steps since the ground was cleared by fire, at progress s through the step:
+// 0 when the CLEAR step starts, continuous through a sapling's two growing
+// steps. Large for ground that never burned and for grown forest.
+float groundAge(uvec4 t, float s) {
+  if (t.a == SETTLED) return 1e4;
+  if (t.r == EMPTY) return float(t.a) + s;
+  if (t.r == TREE && t.b == CAUSE_GROW) return float(t.a) + 1.0 + s;
+  if (t.r == TREE && t.b == CAUSE_MATURE) return float(t.a) + 2.0 + s;
+  return 1e4;
+}
+
+// How far the ground has greened back, 0 (bare dirt) to 1 (grass). Grass
+// starts after the CLEAR step and takes uRegrow steps.
 uniform float uRegrow;
 float regrowth(uvec4 t, float s) {
-  if (t.a == SETTLED) return 1.0;
-  float age = float(t.a);
-  if (t.r == EMPTY) age += s - 1.0;
-  return clamp(age / uRegrow, 0.0, 1.0);
+  return clamp((groundAge(t, s) - 1.0) / uRegrow, 0.0, 1.0);
 }
 `;
 
@@ -79,6 +89,59 @@ function hash(x: number): number {
 export function hashf(cx: number, cy: number, salt: number): number {
   return ((hash(cx ^ hash(cy ^ hash(salt))) & 0xffffff) >>> 0) / 16777216;
 }
+
+// Value noise and fbm, shared by the dual and scene renderers.
+export const noise = /* glsl */ `
+float hashf(ivec2 i, uint salt) {
+  return float(hash3(uvec2(i), salt) & 0xffffffu) / 16777216.0;
+}
+
+float vnoise(vec2 p, uint salt) {
+  ivec2 i = ivec2(floor(p));
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hashf(i, salt), hashf(i + ivec2(1, 0), salt), u.x),
+             mix(hashf(i + ivec2(0, 1), salt), hashf(i + ivec2(1, 1), salt), u.x), u.y);
+}
+
+float fbm(vec2 p, uint salt) {
+  return 0.5 * vnoise(p, salt) + 0.3 * vnoise(p * 2.03 + 17.1, salt) + 0.2 * vnoise(p * 4.07 + 31.7, salt);
+}
+
+// Grass coverage of ground that has regrown by r: it comes back in patches
+// that spread and join.
+float grassAt(vec2 p, float r) {
+  if (r >= 1.0) return 1.0;
+  if (r <= 0.0) return 0.0;
+  float n = 0.75 * fbm(p * 2.2, 4u) + 0.25 * vnoise(p * 11.0, 16u);
+  return smoothstep(n - 0.06, n + 0.06, r * 1.4 - 0.2);
+}
+`;
+
+// The fire front's timing within a cell, shared by the dual and scene renderers.
+export const arrival = /* glsl */ `
+// How far through the catching step (0 to 1) the fire front reaches a point
+// q in the cell, coming from the burning neighbors in the sources mask, or
+// spreading out from a random spot for lightning (an empty mask). The mask
+// is kept through the burning step.
+float arrival(vec2 q, uvec4 t, ivec2 c) {
+  uint m = t.a;
+  if (m == 0u) {
+    vec2 o = 0.3 + 0.4 * vec2(hashf(c, 11u), hashf(c, 12u));
+    return length(q - o) / 0.95;
+  }
+  float a = 2.0;
+  if ((m & 1u) != 0u) a = min(a, q.x);
+  if ((m & 2u) != 0u) a = min(a, 1.0 - q.y);
+  if ((m & 4u) != 0u) a = min(a, 1.0 - q.x);
+  if ((m & 8u) != 0u) a = min(a, q.y);
+  if ((m & 16u) != 0u) a = min(a, length(q) * 0.7071);
+  if ((m & 32u) != 0u) a = min(a, length(q - vec2(0.0, 1.0)) * 0.7071);
+  if ((m & 64u) != 0u) a = min(a, length(q - vec2(1.0)) * 0.7071);
+  if ((m & 128u) != 0u) a = min(a, length(q - vec2(1.0, 0.0)) * 0.7071);
+  return a;
+}
+`;
 
 // Fullscreen triangle; no vertex buffers needed.
 export const fullscreenVert = /* glsl */ `#version 300 es
@@ -153,6 +216,10 @@ void main() {
     } else if (struck(p) || rand(p, 0x9e3779b9u) < uLightning) {
       next = FIRE;
       cause = CAUSE_LIGHTNING;
+    } else if (cur.b == CAUSE_GROW) {
+      // A second step of growing, still keeping the ground's age.
+      cause = CAUSE_MATURE;
+      a = cur.a;
     }
   } else if (rand(p, 0x85ebca6bu) < uGrowth) {
     // A sapling keeps the age of the ground it grows from, to draw it.
@@ -255,47 +322,12 @@ uvec4 cellAt(ivec2 c) {
   return texelFetch(uState, c, 0);
 }
 
-float hashf(ivec2 i, uint salt) {
-  return float(hash3(uvec2(i), salt) & 0xffffffu) / 16777216.0;
-}
-
-float vnoise(vec2 p, uint salt) {
-  ivec2 i = ivec2(floor(p));
-  vec2 f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hashf(i, salt), hashf(i + ivec2(1, 0), salt), u.x),
-             mix(hashf(i + ivec2(0, 1), salt), hashf(i + ivec2(1, 1), salt), u.x), u.y);
-}
-
-float fbm(vec2 p, uint salt) {
-  return 0.5 * vnoise(p, salt) + 0.3 * vnoise(p * 2.03 + 17.1, salt) + 0.2 * vnoise(p * 4.07 + 31.7, salt);
-}
-
+${noise}
 vec4 corners(vec2 u) {
   return vec4((1.0 - u.x) * (1.0 - u.y), u.x * (1.0 - u.y), (1.0 - u.x) * u.y, u.x * u.y);
 }
 
-// How far through the catching step (0 to 1) the fire front reaches a point
-// q in the cell, coming from the burning neighbors in the sources mask, or
-// spreading out from a random spot for lightning.
-float arrival(vec2 q, uvec4 t, ivec2 c) {
-  uint m = t.a;
-  if (t.b != CAUSE_SPREAD || m == 0u) {
-    vec2 o = 0.3 + 0.4 * vec2(hashf(c, 11u), hashf(c, 12u));
-    return length(q - o) / 0.95;
-  }
-  float a = 2.0;
-  if ((m & 1u) != 0u) a = min(a, q.x);
-  if ((m & 2u) != 0u) a = min(a, 1.0 - q.y);
-  if ((m & 4u) != 0u) a = min(a, 1.0 - q.x);
-  if ((m & 8u) != 0u) a = min(a, q.y);
-  if ((m & 16u) != 0u) a = min(a, length(q) * 0.7071);
-  if ((m & 32u) != 0u) a = min(a, length(q - vec2(0.0, 1.0)) * 0.7071);
-  if ((m & 64u) != 0u) a = min(a, length(q - vec2(1.0)) * 0.7071);
-  if ((m & 128u) != 0u) a = min(a, length(q - vec2(1.0, 0.0)) * 0.7071);
-  return a;
-}
-
+${arrival}
 // How brightly a cell burns and how much it smokes over the step.
 vec2 heat(uvec4 t, float s) {
   if (t.g == TREE && t.r == FIRE) return vec2(smoothstep(0.0, 0.8, s), 0.5 * s);
@@ -303,15 +335,6 @@ vec2 heat(uvec4 t, float s) {
   if (t.g == FIRE && t.r == BURNT) return vec2(1.0 - smoothstep(0.1, 0.9, s), 0.5 + 0.5 * sin(3.1416 * s));
   if (t.g == BURNT && t.r == EMPTY) return vec2(0.0, 0.5 * (1.0 - s));
   return vec2(0.0);
-}
-
-// Grass coverage of ground that has regrown by r: it comes back in patches
-// that spread and join.
-float grassAt(vec2 p, float r) {
-  if (r >= 1.0) return 1.0;
-  if (r <= 0.0) return 0.0;
-  float n = 0.75 * fbm(p * 2.2, 4u) + 0.25 * vnoise(p * 11.0, 16u);
-  return smoothstep(n - 0.06, n + 0.06, r * 1.4 - 0.2);
 }
 
 // One cell's look at this pixel, as up to 3 looks with weights, plus the
