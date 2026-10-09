@@ -145,6 +145,15 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - `clips.json`: `{"version":1,"tile":64,"gutter":4,"frames":17,"columns":25,"transitions":[...]}`. Clip index = SW + 5·SE + 25·NW + 125·NE over transitions in that order. The renderer maps (current, previous) state to a transition in `transition()` in `dualFrag`.
 - Binary assets live outside the repo in `$TINDERBOX_DATA` (default `~/.local/share/tinderbox`). Nothing in the app reads them since the Rust port dropped the tiles renderer.
 
+## Criticality: `tinderbox bench` and Lock to critical
+
+The user asked (2026-10-09) for a way to measure how scale-free the fires are for given settings, and an option to lock lightning to the settings that maximise it.
+
+- **Bench** (`src/bench.rs`, native only): a CPU replica of `step.wgsl` (fire spreads for 2 steps, BURNT 1 step, then EMPTY; growth only on EMPTY), run event by event. Growth and strikes are Poisson numbers of random cell picks, only burning cells are visited, and quiet spells skip straight to the next strike. Fires get ids, merged with union-find when they meet, and a fire's size is the trees it burnt. Score: log-bin sizes (5 bins per decade, ≥ 20 fires per bin) and find the widest run of bins that a line fits within 0.06 in log10. That run's width in decades is `decades` and minus its slope is `tau`. `spanning` is the share of burnt trees that burnt in fires over a tenth of the grid. Sweeps go to `$TINDERBOX_DATA/work/bench/*.tsv`.
+- **What it showed (4-neighbor, wrap):** θ = p/f is the main control. Raising θ lengthens the power law until fires start sweeping the grid, so `decades` alone rewards the spanning regime (whole-grid fires still leave a straight middle). The objective is therefore **θ\* = the largest θ with spanning ≤ 5%**. θ\* is not monotone in p. At p ≥ 0.01, regrowth refeeds the fire from behind and fires never go out (one burnt 11× the grid). At small p, the finite grid limits it. The peak shifts with grid size (about p = 10⁻³ at 16 K cells and 3·10⁻⁴ at 1 M cells), so one smooth surface in (cells, p) fit badly (rms 0.43 in ln θ\*). Instead, each p row is its own power law in cells (worst residual 0.2), interpolated in ln p. At θ\* there are about 2 decades at 16 K cells and 3–3.8 at 1 M, with τ ≈ 1.1, consistent with the DS literature.
+- **Lock to critical** (`src/critical.rs`, the panel checkbox): growth is capped at `P_MAX` = 0.003 and lightning = p / θ\*(cells, p). It's re-applied whenever params change or the grid resizes, and the Lightning slider is disabled. Below p = 10⁻⁴, θ\* is held at the 10⁻⁴ row. Beyond 1 M cells it's extrapolated along the row's power law.
+- To refit: run `tinderbox bench --grid 128x128,256x256,512x512,1024x1024 --theta 8,12,…,1600 --p 0.003,0.001,0.0003,0.0001 [--moore] > sweep.tsv`, then `tools/bench/fit.py sweep.tsv`, and paste the rows into `critical.rs`. One sweep takes about 20 minutes on 16 cores; runs in the spanning regime are the slow ones. **Launch long sweeps with `systemd-run --user`**: a Tandem restart kills everything the session started, `setsid nohup` included. `--resume FILE` skips runs already in FILE, so append to it (`>> FILE`) to finish an interrupted sweep.
+
 ## Milestones
 
 - [x] v0 per-cell renderer, procedural placeholder, Wan VACE generator, turnstile lease client
@@ -211,6 +220,7 @@ The M2 recipe with five looks, so 625 configurations:
 
 ## Log
 
+- **2026-10-09 (late evening):** `tinderbox bench` and Lock to critical (see *Criticality*).
 - **2026-10-09 (afternoon):** `tinderbox update` (`src/update.rs`) installs the latest GitHub release over the running binary via system `curl` and `tar` (no HTTP/TLS crates), renaming over it (on Windows the running exe is renamed to `.old` first and removed on the next update); `--force` reinstalls. Also `--version`. Tested on Linux with `--force` against v0.4.0, including through a symlink; macOS and Windows untested. Released v0.5.0.
 - **2026-10-09 (night):** Release builds never hit the rust-cache: caches saved on a tag ref are invisible to other tags. The workflow now also builds on pushes to main (Rust paths only, superseded runs cancelled) to save the cache there; tag runs restore it without saving.
 - **2026-10-09 (evening, later):** Keep the screen awake while running (web wake lock; Linux GNOME/freedesktop inhibitor). Released v0.7.0.

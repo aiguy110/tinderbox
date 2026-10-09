@@ -374,7 +374,9 @@ law, its exponent, and how close fires come to spanning the grid.
   --fires N          fires to record per run (default 20000)
   --secs S           time budget per run (default 300)
   --threads N        runs at once (default: all cores)
-  --sizes DIR        also write each run's fire sizes to DIR";
+  --sizes DIR        also write each run's fire sizes to DIR
+  --resume FILE      skip runs already in FILE (an earlier sweep's output)
+                     and leave out the header, for appending to it";
 
 fn list<T: std::str::FromStr>(args: &[String], flag: &str, default: &str) -> Result<Vec<T>, String> {
     let v = args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or(default);
@@ -410,17 +412,34 @@ pub fn main(args: &[String]) -> Result<(), String> {
         std::fs::create_dir_all(d).map_err(|e| format!("{d}: {e}"))?;
     }
 
+    // (w, h, moore, p, theta) as printed, of runs already done.
+    let done: std::collections::HashSet<String> = match args.iter().position(|a| a == "--resume").and_then(|i| args.get(i + 1)) {
+        Some(f) => std::fs::read_to_string(f)
+            .map_err(|e| format!("{f}: {e}"))?
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').take(5).collect::<Vec<_>>().join("\t"))
+            .collect(),
+        None => Default::default(),
+    };
+    let key = |c: &Config| format!("{}\t{}\t{}\t{}\t{}", c.w, c.h, c.moore as u8, c.growth, c.theta);
     let mut configs = vec![];
     for &(w, h) in &grids {
         for &moore in &moores {
             for &growth in &ps {
                 for &theta in &thetas {
-                    configs.push(Config { w, h, moore, wrap, growth, theta });
+                    let c = Config { w, h, moore, wrap, growth, theta };
+                    if !done.contains(&key(&c)) {
+                        configs.push(c);
+                    }
                 }
             }
         }
     }
-    println!("w\th\tmoore\tp\ttheta\tfires\tsteps\tdensity\tdecades\ttau\tlo\thi\tlargest\tspanning\tsecs");
+    if done.is_empty() {
+        println!("w\th\tmoore\tp\ttheta\tfires\tsteps\tdensity\tdecades\ttau\tlo\thi\tlargest\tspanning\tsecs");
+    }
+    eprintln!("{} runs", configs.len());
     let next = AtomicUsize::new(0);
     let print = Mutex::new(());
     let seed = Rng::from_clock().next_u64();
@@ -440,12 +459,8 @@ pub fn main(args: &[String]) -> Result<(), String> {
                     }
                     let _g = print.lock();
                     println!(
-                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{:.2}\t{:.3}\t{:.0}\t{:.0}\t{:.4}\t{:.3}\t{:.0}",
-                        c.w,
-                        c.h,
-                        c.moore as u8,
-                        c.growth,
-                        c.theta,
+                        "{}\t{}\t{}\t{:.3}\t{:.2}\t{:.3}\t{:.0}\t{:.0}\t{:.4}\t{:.3}\t{:.0}",
+                        key(&c),
                         r.sizes.len(),
                         r.steps,
                         r.density,
