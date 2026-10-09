@@ -209,6 +209,7 @@ The M2 recipe with five looks, so 625 configurations:
 
 ## Log
 
+- **2026-10-09 (afternoon):** `tinderbox update` (`src/update.rs`) installs the latest GitHub release over the running binary via system `curl` and `tar` (no HTTP/TLS crates), renaming over it (on Windows the running exe is renamed to `.old` first and removed on the next update); `--force` reinstalls. Also `--version`. Tested on Linux with `--force` against v0.4.0, including through a symlink; macOS and Windows untested. Released v0.5.0.
 - **2026-10-09 (late morning):** Released v0.4.0 (save/resume, skeletal snags).
 - **2026-10-09 (morning):** Skeletal snags standing twice as long; the grid is saved every 5 s and resumed on reload or re-run. Verified on the web in Playwright (generation carried over a reload); native save/load is unit-tested only (no display on bifrost).
 - **2026-10-08:** Built v0 end to end and generated a real atlas. The spread midpoint wipe reliably fixes fire direction. Keyframe lessons: the model ignites late in a burn clip, so pick the most-fire frame. The empty keyframe needs its own text-to-image pass. Loops with identical first and last frames come out nearly static. The user rejected v0 for its seams and rotation, which led to the v1 dual-grid design above.

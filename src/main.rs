@@ -17,6 +17,8 @@ mod shaders;
 mod shot;
 mod sim;
 mod ui;
+#[cfg(not(target_arch = "wasm32"))]
+mod update;
 
 use winit::event_loop::EventLoop;
 
@@ -32,6 +34,7 @@ fn main() {
 #[cfg(not(target_arch = "wasm32"))]
 const USAGE: &str = "\
 usage: tinderbox [options]
+       tinderbox update [--force]
 
   (no options)        span the scene across every monitor, fullscreen
   --monitors 0,2      span only these monitors
@@ -49,6 +52,10 @@ usage: tinderbox [options]
                       XSCREENSAVER_WINDOW, for xsecurelock or xscreensaver
       --window-id ID         draw into this X window instead
 
+  update              replace this binary with the latest GitHub release
+                      (--force reinstalls it even if it's not newer)
+  --version           print the version
+
 Keys: H hides the panel, F toggles fullscreen (windowed), Space pauses,
 . steps, Esc quits. Click or drag to start fires.";
 
@@ -57,6 +64,17 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
+        return;
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("tinderbox {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if args.first().is_some_and(|a| a == "update") {
+        if let Err(e) = update::run(&args[1..]) {
+            eprintln!("tinderbox update: {e}");
+            std::process::exit(1);
+        }
         return;
     }
     #[cfg(target_os = "linux")]

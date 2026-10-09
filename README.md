@@ -18,6 +18,8 @@ Binaries for Linux (x86_64), macOS (Apple Silicon) and Windows (x86_64) are on t
 - **macOS:** extract the archive, then run `xattr -d com.apple.quarantine tinderbox` once (the binary isn't signed) and `./tinderbox`.
 - **Windows:** extract the zip and run `tinderbox.exe`. SmartScreen may warn about an unrecognized app; choose *More info → Run anyway*.
 
+To update later, run `tinderbox update`. It replaces the binary (and, on Linux, `tinderbox-saver` and `tinderbox-lock` if they sit next to it) with the latest release. It uses `curl` and `tar`, which come with Linux, macOS and Windows 10 and later; if the binary is somewhere you can't write, such as `/usr/local/bin`, run it with `sudo`.
+
 By default it spans every monitor fullscreen; `Esc` quits. `tinderbox --windowed` runs in a window, and `tinderbox --help` lists the other options. Controls are under [Run](#run).
 
 ## Lock screen (Linux, X11)
