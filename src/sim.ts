@@ -1,5 +1,5 @@
 import { type TileAtlas, uploadAtlas } from './atlas';
-import { Cause, State, dualFrag, flatFrag, fullscreenVert, stepFrag } from './shaders';
+import { Cause, MAX_STRIKES, hashf, State, dualFrag, flatFrag, fullscreenVert, stepFrag } from './shaders';
 
 export type Renderer = 'flat' | 'dual';
 
@@ -21,6 +21,13 @@ export interface StepParams {
   lightning: number;
   moore: boolean;
   wrap: boolean;
+  stepsPerSecond: number;
+}
+
+/** A cell that lightning set alight. */
+export interface Strike {
+  x: number;
+  y: number;
 }
 
 interface Buffer {
@@ -29,6 +36,12 @@ interface Buffer {
 }
 
 const MIN_GROVE_PX = 6;
+/**
+ * Lightning strikes per second that get a bolt. Strikes are split between a
+ * short list picked here (so we know where they land) and the rest, which the
+ * step shader rolls per cell; together they're the same Poisson process.
+ */
+const BOLTS_PER_SECOND = 3;
 
 type Uniforms = Record<string, WebGLUniformLocation | null>;
 
@@ -58,7 +71,7 @@ export class ForestFire {
     this.stepProg = link(gl, fullscreenVert, stepFrag);
     this.flatProg = link(gl, fullscreenVert, flatFrag);
     this.dualProg = link(gl, fullscreenVert, dualFrag);
-    this.stepU = uniforms(gl, this.stepProg, ['uState', 'uSeed', 'uGrowth', 'uLightning', 'uMoore', 'uWrap']);
+    this.stepU = uniforms(gl, this.stepProg, ['uState', 'uSeed', 'uGrowth', 'uLightning', 'uMoore', 'uWrap', 'uStrikes', 'uStrikeCount']);
     this.flatU = uniforms(gl, this.flatProg, ['uState', 'uCellPx', 'uGridLines']);
     this.dualU = uniforms(gl, this.dualProg, ['uState', 'uTiles', 'uCellPx', 'uGrove', 'uGridLines', 'uWrap', 'uProgress', 'uTime']);
     this.vao = gl.createVertexArray()!;
@@ -112,8 +125,9 @@ export class ForestFire {
     this.generation = 0;
   }
 
-  step(p: StepParams) {
-    if (!this.buffers) return;
+  /** Advance one step. Returns the listed lightning strikes that lit a tree. */
+  step(p: StepParams): Strike[] {
+    if (!this.buffers) return [];
     const gl = this.gl;
     const src = this.buffers[this.current];
     const dst = this.buffers[1 - this.current];
@@ -125,13 +139,44 @@ export class ForestFire {
     gl.uniform1i(this.stepU.uState, 0);
     gl.uniform1ui(this.stepU.uSeed, (Math.random() * 0xffffffff) >>> 0);
     gl.uniform1f(this.stepU.uGrowth, p.growth);
-    gl.uniform1f(this.stepU.uLightning, p.lightning);
+    const cells = this.width * this.height;
+    const expected = p.lightning * cells;
+    const listedRate = Math.min(expected, BOLTS_PER_SECOND / p.stepsPerSecond, MAX_STRIKES / 4);
+    const n = Math.min(MAX_STRIKES, poisson(listedRate));
+    const strikes = new Int32Array(2 * MAX_STRIKES);
+    for (let i = 0; i < n; i++) {
+      strikes[2 * i] = Math.floor(Math.random() * this.width);
+      strikes[2 * i + 1] = Math.floor(Math.random() * this.height);
+    }
+    gl.uniform1f(this.stepU.uLightning, (expected - listedRate) / cells);
+    gl.uniform2iv(this.stepU.uStrikes, strikes);
+    gl.uniform1i(this.stepU.uStrikeCount, n);
     gl.uniform1i(this.stepU.uMoore, p.moore ? 1 : 0);
     gl.uniform1i(this.stepU.uWrap, p.wrap ? 1 : 0);
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     this.current = 1 - this.current;
     this.generation++;
+
+    // Strikes are rare, so a synchronous read of just those cells is cheap.
+    const hits: Strike[] = [];
+    const px = new Uint32Array(4);
+    for (let i = 0; i < n; i++) {
+      const x = strikes[2 * i];
+      const y = strikes[2 * i + 1];
+      gl.readPixels(x, y, 1, 1, gl.RGBA_INTEGER, gl.UNSIGNED_INT, px);
+      if (px[0] === State.FIRE && px[2] === Cause.LIGHTNING) hits.push({ x, y });
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return hits;
+  }
+
+  /**
+   * Where in a struck cell the fire starts, in canvas pixels (y up). Matches
+   * the lightning origin in the dual renderer's arrival().
+   */
+  strikePoint(s: Strike): [number, number] {
+    return [(s.x + 0.3 + 0.4 * hashf(s.x, s.y, 11)) * this.cellPx, (s.y + 0.3 + 0.4 * hashf(s.x, s.y, 12)) * this.cellPx];
   }
 
   setTiles(data: TileAtlas) {
@@ -167,15 +212,16 @@ export class ForestFire {
   }
 
   /** Strike lightning at a canvas-relative CSS pixel position. */
-  ignite(cssX: number, cssY: number) {
-    if (!this.buffers) return;
+  ignite(cssX: number, cssY: number): Strike | null {
+    if (!this.buffers) return null;
     const dpr = window.devicePixelRatio || 1;
     const x = Math.floor((cssX * dpr) / this.cellPx);
     const y = Math.floor((this.canvas.height - cssY * dpr) / this.cellPx);
-    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return;
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return null;
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.buffers[this.current].tex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, 1, 1, gl.RGBA_INTEGER, gl.UNSIGNED_BYTE, new Uint8Array([State.FIRE, State.TREE, Cause.LIGHTNING, 0]));
+    return { x, y };
   }
 
   private createBuffers(w: number, h: number, density: number): [Buffer, Buffer] {
@@ -208,6 +254,13 @@ export class ForestFire {
   }
 }
 
+function poisson(mean: number): number {
+  const l = Math.exp(-mean);
+  let k = 0;
+  for (let p = Math.random(); p > l; p *= Math.random()) k++;
+  return k;
+}
+
 function seedData(w: number, h: number, density: number): Uint8Array {
   const data = new Uint8Array(w * h * 4);
   for (let i = 0; i < w * h; i++) {
@@ -216,7 +269,7 @@ function seedData(w: number, h: number, density: number): Uint8Array {
   return data;
 }
 
-function link(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram {
+export function link(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram {
   const prog = gl.createProgram()!;
   for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]] as const) {
     const sh = gl.createShader(type)!;
@@ -234,6 +287,6 @@ function link(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram 
   return prog;
 }
 
-function uniforms(gl: WebGL2RenderingContext, prog: WebGLProgram, names: string[]): Uniforms {
+export function uniforms(gl: WebGL2RenderingContext, prog: WebGLProgram, names: string[]): Uniforms {
   return Object.fromEntries(names.map((n) => [n, gl.getUniformLocation(prog, n)]));
 }

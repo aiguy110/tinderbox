@@ -6,6 +6,9 @@
 // Keeping (prev, cause, sources) alongside the state means a renderer can pick
 // the right transition animation per cell without any extra bookkeeping.
 
+/** Lightning strikes per step whose cells are picked on the CPU (see sim.ts). */
+export const MAX_STRIKES = 16;
+
 export const State = { EMPTY: 0, TREE: 1, FIRE: 2, BURNT: 3 } as const;
 export const Cause = { NONE: 0, GROW: 1, SPREAD: 2, LIGHTNING: 3, BURNOUT: 4, BURNING: 5, CLEAR: 6 } as const;
 
@@ -43,6 +46,21 @@ uint hash3(uvec2 c, uint salt) {
 }
 `;
 
+// The same hash as the shaders' hash3/hashf, so the CPU can find where the
+// dual renderer starts a lightning fire.
+function hash(x: number): number {
+  x ^= x >>> 16;
+  x = Math.imul(x, 0x7feb352d);
+  x ^= x >>> 15;
+  x = Math.imul(x, 0x846ca68b);
+  x ^= x >>> 16;
+  return x >>> 0;
+}
+
+export function hashf(cx: number, cy: number, salt: number): number {
+  return ((hash(cx ^ hash(cy ^ hash(salt))) & 0xffffff) >>> 0) / 16777216;
+}
+
 // Fullscreen triangle; no vertex buffers needed.
 export const fullscreenVert = /* glsl */ `#version 300 es
 void main() {
@@ -58,10 +76,19 @@ uniform float uGrowth;
 uniform float uLightning;
 uniform bool uMoore;
 uniform bool uWrap;
+uniform ivec2 uStrikes[${MAX_STRIKES}];
+uniform int uStrikeCount;
 
 out uvec4 outState;
 
 ivec2 gridSize;
+
+bool struck(ivec2 p) {
+  for (int i = 0; i < uStrikeCount; i++) {
+    if (uStrikes[i] == p) return true;
+  }
+  return false;
+}
 
 const ivec2 NEIGHBORS[8] = ivec2[8](${neighborOffsets.join(', ')});
 
@@ -104,7 +131,7 @@ void main() {
     if (sources != 0u) {
       next = FIRE;
       cause = CAUSE_SPREAD;
-    } else if (rand(p, 0x9e3779b9u) < uLightning) {
+    } else if (struck(p) || rand(p, 0x9e3779b9u) < uLightning) {
       next = FIRE;
       cause = CAUSE_LIGHTNING;
     }

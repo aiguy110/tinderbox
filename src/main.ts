@@ -1,8 +1,9 @@
 import './style.css';
 import { loadTiles } from './atlas';
 import { buildControls } from './controls';
+import { Lightning } from './lightning';
 import { load, save } from './params';
-import { ForestFire } from './sim';
+import { ForestFire, type Strike } from './sim';
 
 const MAX_STEPS_PER_FRAME = 16;
 /** While paused, a manual step's transitions play at most this fast. */
@@ -13,8 +14,10 @@ const panel = document.querySelector<HTMLElement>('#panel')!;
 const params = load();
 
 let sim: ForestFire;
+let lightning: Lightning;
 try {
   sim = new ForestFire(canvas);
+  lightning = new Lightning(sim.gl);
 } catch (err) {
   document.body.textContent = String(err);
   throw err;
@@ -58,11 +61,17 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === '.') stepOnce();
 });
 
-// Click or drag on the canvas to ignite cells.
+// Click or drag on the canvas to ignite cells. Dragging throws fewer bolts.
+const DRAG_BOLT_MS = 150;
 let igniting = false;
+let boltAt = 0;
 const igniteAt = (e: PointerEvent) => {
   const r = canvas.getBoundingClientRect();
-  sim.ignite(e.clientX - r.left, e.clientY - r.top);
+  const hit = sim.ignite(e.clientX - r.left, e.clientY - r.top);
+  if (hit && e.timeStamp - boltAt > DRAG_BOLT_MS) {
+    boltAt = e.timeStamp;
+    strike([hit]);
+  }
 };
 canvas.addEventListener('pointerdown', (e) => {
   igniting = true;
@@ -79,8 +88,12 @@ let debt = 0;
 let fps = 0;
 let statsAt = 0;
 
+function strike(hits: Strike[]) {
+  for (const h of hits) lightning.strike(...sim.strikePoint(h), performance.now());
+}
+
 function stepOnce() {
-  sim.step(params);
+  strike(sim.step(params));
   debt = 0;
 }
 
@@ -92,12 +105,13 @@ function frame(now: number) {
   if (!params.paused) {
     debt += dt * params.stepsPerSecond;
     const n = Math.min(MAX_STEPS_PER_FRAME, Math.floor(debt));
-    for (let i = 0; i < n; i++) sim.step(params);
+    for (let i = 0; i < n; i++) strike(sim.step(params));
     debt = n === MAX_STEPS_PER_FRAME ? 0 : debt - n;
   } else {
     debt = Math.min(1, debt + dt * Math.min(params.stepsPerSecond, PAUSED_STEPS_PER_SECOND));
   }
   sim.render({ gridLines: params.gridLines, renderer: params.renderer, grove: params.grove, wrap: params.wrap, progress: debt, time: now / 1000 });
+  lightning.render(now);
 
   if (now - statsAt > 250) {
     statsAt = now;

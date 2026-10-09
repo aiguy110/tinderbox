@@ -56,6 +56,14 @@ Over a step each cell blends, per pixel, from its previous look to its current o
 - **Fire light and smoke** are bilinear over the cell-scale dual grid.
 - **Groves:** with `grove` = n > 1, tiles are laid on an n×n sub-cell grid. Sub-cells share their cell's state, a fifth are clearings (hashed), and a low-frequency warp bends the sub-grid so it doesn't read as an orchard. Transition weights stay in cell space, so a front crosses a whole stand. It's capped so that sub-cells are at least 6 px.
 
+### Lightning bolts (`src/lightning.ts`)
+
+A lightning ignition is punctuated by a procedural bolt from the top of the screen to the spot in the cell where `arrival()` starts the fire (the CPU ports the shader hash to find it). A dim leader descends over 70 ms, then the return stroke flashes, with one or two restrikes and a faint sky flash; it's gone after 0.75 s of wall time, whatever the step rate.
+
+- **Knowing where it struck.** Lightning is rolled per cell on the GPU, so the CPU can't see it. Instead, up to `BOLTS_PER_SECOND` (3) strikes per second are picked on the CPU as a short Poisson-sampled list of cells (`uStrikes`), and the shader's per-cell rate is reduced by the same amount, so the total process is unchanged. After the step, only the listed cells are read back (sync `readPixels`, cheap at this rate); those that became FIRE with cause LIGHTNING get a bolt. A listed strike on bare ground, or on a tree that caught by spread anyway, shows nothing.
+- **Drawing.** Midpoint-displaced polyline with forks, drawn as capsule quads into an offscreen buffer with MAX blending (so joints and overlapping glow don't double), then added onto the scene. Clicking to ignite also throws a bolt (throttled while dragging).
+- **Testing tip:** Playwright's `page.clock` fake timers hang this page. To inspect a bolt frame, wrap `Lightning.render` to pass a fixed time instead.
+
 #### Why transitions moved to the shader
 
 Showing which side fire entered needs the cell to remember the direction; a tile containing only the far half of the cell can't see the source otherwise. That turns catch into 4–5 variants. Together with burning and burnt, each corner has about 10 transitions, so there would be 10⁴ = 10,000 clips (about 3.5 GB and 9 GPU hours at M3 settings, against 220 MB and 35 min for 625). The M3 clips were also mushy in exactly the part a shader does well: a front moving across a cell.
@@ -101,6 +109,7 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 
 ## Next steps
 
+1. Get the user's verdict on the lightning bolts (look, duration, bolts per second).
 1. Get the user's verdict on the shader transitions and groves in motion (3–5 s per step, cells ≥ 24 px). Tune timing and strength: the front's glow, burn-down patches, embers and smoke.
 2. M4, forest stills: keyframes for a dense stand of canopy (trees overlapping, filling the cell), a burning stand and a burnt stand, then `tiles.py` with K=4 (256 configs, 16×16 atlas). Update `loadTiles`/`DUAL_CONFIGS`, and drop the charred-TREE stand-in in `shade()` once BURNT tiles exist. Image model only; video isn't needed.
 3. Optional: a short seamless flicker loop for burning tiles from the video model, if the shader flicker isn't enough.
