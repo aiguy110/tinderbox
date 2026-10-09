@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "tinderbox"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "console_error_panic_hook",
@@ -2051,6 +2051,7 @@ dependencies = [
  "egui-wgpu",
  "png",
  "pollster",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "wasm-bindgen",
@@ -2059,6 +2060,7 @@ dependencies = [
  "web-time",
  "wgpu",
  "winit",
+ "x11-dl",
 ]
 
 [[package]]

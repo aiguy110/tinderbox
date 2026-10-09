@@ -1,0 +1,9 @@
+#!/bin/sh
+# Screensaver entry point for xsecurelock (XSECURELOCK_SAVER), which runs its
+# saver without arguments. Runs the tinderbox next to this script, or else the
+# one on PATH, in saver mode; it draws into $XSCREENSAVER_WINDOW.
+here=$(dirname "$(readlink -f "$0")")
+if [ -x "$here/tinderbox" ]; then
+  exec "$here/tinderbox" --saver "$@"
+fi
+exec tinderbox --saver "$@"

@@ -9,6 +9,8 @@ mod lightning;
 mod params;
 mod render;
 mod rng;
+#[cfg(target_os = "linux")]
+mod saver;
 mod shaders;
 #[cfg(not(target_arch = "wasm32"))]
 mod shot;
@@ -42,6 +44,9 @@ usage: tinderbox [options]
       --steps N              steps to run after igniting each view's center (default 3)
       --progress X           how far through the last step, 0 to 1 (default 0.5)
       --flat, --night        renderer and lighting
+  --saver             screensaver mode (Linux, X11): draw into the window in
+                      XSCREENSAVER_WINDOW, for xsecurelock or xscreensaver
+      --window-id ID         draw into this X window instead
 
 Keys: H hides the panel, F toggles fullscreen (windowed), Space pauses,
 . steps, Esc quits. Click or drag to start fires.";
@@ -51,6 +56,14 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if args.iter().any(|a| a == "--saver") {
+        if let Err(e) = saver::run(&args) {
+            eprintln!("tinderbox: {e}");
+            std::process::exit(1);
+        }
         return;
     }
     if args.iter().any(|a| a == "--shot") {
