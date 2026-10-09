@@ -115,6 +115,8 @@ On several monitors the grid covers their bounding box, and each monitor shows i
 
 Click or drag to start fires. Settings, including whether the panel is hidden, are saved (localStorage on the web, `~/.config/tinderbox/params.json` natively). The forest itself is saved every few seconds and picks up where it left off (localStorage on the web, `~/.local/state/tinderbox/grid.bin` natively).
 
+While it runs, the screen stays awake: on the web it holds a screen wake lock (phones included; the browser lifts it when the tab is hidden), and on Linux it asks the desktop (GNOME, or any desktop with the freedesktop screensaver interface) not to blank, lock or suspend. Not yet on macOS or Windows.
+
 ## Layout
 
 - `src/shaders/*.wgsl`: the update rule (`step`), the procedural scene (`scene`, the default), flat colors (`flat`), lightning bolts and the upscaling blit. `src/shaders.rs` assembles them with the state constants

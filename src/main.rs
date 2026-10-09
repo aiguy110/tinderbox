@@ -3,6 +3,7 @@
 //! span one scene across several monitors. See README.md.
 
 mod app;
+mod awake;
 mod engine;
 mod input;
 mod lightning;
@@ -28,6 +29,7 @@ fn main() {
     console_error_panic_hook::set_once();
     let el = EventLoop::<app::UserEvent>::with_user_event().build().expect("event loop");
     let proxy = el.create_proxy();
+    let _ = awake::keep();
     el.spawn_app(app::App::new(app::Mode::Web, proxy));
 }
 
@@ -124,6 +126,7 @@ fn main() {
         }
     };
     let proxy = el.create_proxy();
+    let _awake = if matches!(mode, app::Mode::ListMonitors) { None } else { awake::keep() };
     let mut app = app::App::new(mode, proxy);
     if let Err(e) = el.run_app(&mut app) {
         eprintln!("tinderbox: {e}");
