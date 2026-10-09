@@ -1,23 +1,17 @@
 // Cell state lives in an RGBA8UI texture, one texel per cell:
 //   R = current state, G = previous state, B = cause of the last transition,
 //   A = for SPREAD, a bitmask of the neighbors that were burning (see Neighbor).
+// A fire lasts two steps (catching, then burning), leaves a burnt stand for
+// one step, and then clears to empty ground.
 // Keeping (prev, cause, sources) alongside the state means a renderer can pick
 // the right transition animation per cell without any extra bookkeeping.
 
-export const State = { EMPTY: 0, TREE: 1, FIRE: 2 } as const;
-export const Cause = { NONE: 0, GROW: 1, SPREAD: 2, LIGHTNING: 3, BURNOUT: 4 } as const;
+export const State = { EMPTY: 0, TREE: 1, FIRE: 2, BURNT: 3 } as const;
+export const Cause = { NONE: 0, GROW: 1, SPREAD: 2, LIGHTNING: 3, BURNOUT: 4, BURNING: 5, CLEAR: 6 } as const;
 
-// Neighbor bits, ordered so that `bit & 3` is the number of quarter turns
-// (counterclockwise, y up) that map the canonical source onto that neighbor.
-// Edge clips are drawn with the fire arriving from the west, corner clips
-// from the south-west.
+// Neighbor bits for the sources mask (y up).
 export const Neighbor = { W: 0, N: 1, E: 2, S: 3, SW: 4, NW: 5, NE: 6, SE: 7 } as const;
 const neighborOffsets = ['ivec2(-1, 0)', 'ivec2(0, 1)', 'ivec2(1, 0)', 'ivec2(0, -1)', 'ivec2(-1, -1)', 'ivec2(-1, 1)', 'ivec2(1, 1)', 'ivec2(1, -1)'];
-
-// Animation clips, in the order the renderer indexes them.
-export const CLIPS = ['empty', 'tree', 'grow', 'spread-edge', 'spread-corner', 'lightning', 'burnout'] as const;
-export type ClipName = (typeof CLIPS)[number];
-const clipConsts = CLIPS.map((c, i) => `const int CLIP_${c.toUpperCase().replace('-', '_')} = ${i};`).join('\n');
 
 const common = /* glsl */ `#version 300 es
 precision highp float;
@@ -27,12 +21,15 @@ precision highp usampler2D;
 const uint EMPTY = ${State.EMPTY}u;
 const uint TREE = ${State.TREE}u;
 const uint FIRE = ${State.FIRE}u;
+const uint BURNT = ${State.BURNT}u;
 
 const uint CAUSE_NONE = ${Cause.NONE}u;
 const uint CAUSE_GROW = ${Cause.GROW}u;
 const uint CAUSE_SPREAD = ${Cause.SPREAD}u;
 const uint CAUSE_LIGHTNING = ${Cause.LIGHTNING}u;
 const uint CAUSE_BURNOUT = ${Cause.BURNOUT}u;
+const uint CAUSE_BURNING = ${Cause.BURNING}u;
+const uint CAUSE_CLEAR = ${Cause.CLEAR}u;
 
 uint hash(uint x) {
   x ^= x >> 16; x *= 0x7feb352du;
@@ -84,14 +81,22 @@ bool burning(ivec2 p) {
 void main() {
   gridSize = textureSize(uState, 0);
   ivec2 p = ivec2(gl_FragCoord.xy);
-  uint s = texelFetch(uState, p, 0).r;
+  uvec4 cur = texelFetch(uState, p, 0);
+  uint s = cur.r;
   uint next = s;
   uint cause = CAUSE_NONE;
   uint sources = 0u;
 
-  if (s == FIRE) {
-    next = EMPTY;
+  if (s == FIRE && cur.g == TREE) {
+    // Caught last step: burn for a step, keeping where the fire came from.
+    cause = CAUSE_BURNING;
+    sources = cur.a;
+  } else if (s == FIRE) {
+    next = BURNT;
     cause = CAUSE_BURNOUT;
+  } else if (s == BURNT) {
+    next = EMPTY;
+    cause = CAUSE_CLEAR;
   } else if (s == TREE) {
     for (int i = 0; i < (uMoore ? 8 : 4); i++) {
       if (burning(p + NEIGHBORS[i])) sources |= 1u << i;
@@ -103,7 +108,7 @@ void main() {
       next = FIRE;
       cause = CAUSE_LIGHTNING;
     }
-  } else if (rand(p, 0x85ebca6bu) < uGrowth) {
+  } else if (s == EMPTY && rand(p, 0x85ebca6bu) < uGrowth) {
     next = TREE;
     cause = CAUSE_GROW;
   }
@@ -135,6 +140,9 @@ void main() {
   } else if (s == FIRE) {
     c = mix(vec3(1.0, 0.35, 0.05), vec3(1.0, 0.75, 0.2), jitter);
     if (cause == CAUSE_LIGHTNING) c = vec3(0.85, 0.92, 1.0);
+    if (cause == CAUSE_BURNING) c *= 0.7;
+  } else if (s == BURNT) {
+    c = mix(vec3(0.14, 0.12, 0.11), vec3(0.20, 0.17, 0.15), jitter);
   } else {
     c = mix(vec3(0.06, 0.05, 0.04), vec3(0.09, 0.07, 0.05), jitter);
     if (cause == CAUSE_BURNOUT) c = vec3(0.30, 0.12, 0.06);
@@ -150,156 +158,165 @@ void main() {
 }
 `;
 
-// Sprite renderer: each cell plays an animation clip from a texture-array
-// atlas. Transition clips (grow, spread, lightning, burnout) run once over the
-// step that produced them; idle clips (empty, tree) loop on wall-clock time
-// with a per-cell phase offset so neighbors don't move in lockstep.
-export const spriteFrag = /* glsl */ `${common}
-precision highp sampler2DArray;
-${clipConsts}
-
-uniform usampler2D uState;
-uniform sampler2DArray uAtlas;
-uniform float uCellPx;
-uniform bool uGridLines;
-uniform float uProgress;
-uniform float uTime;
-// Per clip: first atlas layer, frame count, and loop period in seconds
-// (0 for clips timed to the step).
-uniform ivec2 uClipFrames[${CLIPS.length}];
-uniform float uClipSeconds[${CLIPS.length}];
-
-out vec4 outColor;
-
-// Rotate by r quarter turns counterclockwise.
-vec2 turn(vec2 v, uint r) {
-  if (r == 1u) return vec2(-v.y, v.x);
-  if (r == 2u) return -v;
-  if (r == 3u) return vec2(v.y, -v.x);
-  return v;
-}
-
-// Pick one set bit of a 4-bit mask, starting the search at a per-cell offset.
-uint pickBit(uint mask, uint start) {
-  for (uint i = 0u; i < 4u; i++) {
-    uint b = (start + i) & 3u;
-    if (((mask >> b) & 1u) != 0u) return b;
-  }
-  return start & 3u;
-}
-
-void main() {
-  vec2 cellF = gl_FragCoord.xy / uCellPx;
-  ivec2 cell = ivec2(cellF);
-  uvec4 t = texelFetch(uState, cell, 0);
-  uint s = t.r;
-  uint cause = t.b;
-  uint h = hash3(uvec2(cell), 0x27d4eb2du);
-
-  int clip;
-  uint r = 0u;
-  bool mirror = (h & 0x100u) != 0u;
-  if (s == TREE) {
-    clip = cause == CAUSE_GROW ? CLIP_GROW : CLIP_TREE;
-  } else if (s == FIRE) {
-    if (cause == CAUSE_SPREAD && t.a != 0u) {
-      // Orient the clip so the fire arrives from an actual burning neighbor.
-      mirror = false;
-      uint edges = t.a & 15u;
-      clip = edges != 0u ? CLIP_SPREAD_EDGE : CLIP_SPREAD_CORNER;
-      r = pickBit(edges != 0u ? edges : t.a >> 4, h);
-    } else {
-      clip = CLIP_LIGHTNING;
-    }
-  } else {
-    clip = cause == CAUSE_BURNOUT ? CLIP_BURNOUT : CLIP_EMPTY;
-  }
-
-  ivec2 frames = uClipFrames[clip];
-  float period = uClipSeconds[clip];
-  float pos;
-  if (period > 0.0) {
-    float phase = float((h >> 12) & 1023u) / 1024.0;
-    pos = fract(uTime / period + phase) * float(frames.y);
-  } else {
-    pos = clamp(uProgress, 0.0, 1.0) * float(frames.y - 1);
-  }
-  int f0 = int(pos);
-  int f1 = period > 0.0 ? (f0 + 1) % frames.y : min(f0 + 1, frames.y - 1);
-
-  // Map the cell into clip space. Gradients come from the continuous cellF so
-  // mip selection doesn't spike at cell borders.
-  vec2 uv = turn(fract(cellF) - 0.5, r);
-  vec2 gx = turn(dFdx(cellF), r);
-  vec2 gy = turn(dFdy(cellF), r);
-  vec2 flip = vec2(mirror ? -1.0 : 1.0, -1.0); // atlas rows run top-down
-  uv = uv * flip + 0.5;
-  gx *= flip;
-  gy *= flip;
-
-  vec4 a = textureGrad(uAtlas, vec3(uv, float(frames.x + f0)), gx, gy);
-  vec4 b = textureGrad(uAtlas, vec3(uv, float(frames.x + f1)), gx, gy);
-  vec3 c = mix(a.rgb, b.rgb, fract(pos));
-
-  if (uGridLines) {
-    vec2 g = fract(cellF);
-    float edge = step(g.x, 1.0 / uCellPx) + step(g.y, 1.0 / uCellPx);
-    c *= 1.0 - 0.35 * min(edge, 1.0);
-  }
-
-  outColor = vec4(c, 1.0);
-}
-`;
-
 // Dual-grid renderer (docs/PLAN.md). Tiles sit on grid vertices and each
 // covers a quarter of the 4 cells around it, so a tile is chosen purely by
 // those 4 states and borders between tiles depend only on the cells they
-// pass through. Within a step each tile plays the clip for its 4 cells'
-// transitions, which starts and ends on the stills of the step-boundary
-// states. Until the clips have loaded it crossfades between those stills.
+// pass through.
+//
+// Transitions are drawn here rather than generated. Over a step, each cell
+// blends per pixel from its previous look to its current one, with a weight
+// that is a function of world position: fire sweeps in from the neighbors
+// that lit it, saplings grow out from the middle, flames die out and ash
+// clears in noisy patches. A pixel mixes the tiles for every combination of
+// its 4 cells' looks, weighted multilinearly. Because the weights depend only
+// on the cell and the world position, both tiles on a shared border agree
+// and the result stays seamless.
+//
+// The stills only cover {EMPTY, TREE, FIRE}; BURNT is drawn by charring the
+// trees in the TREE tile.
 export const dualFrag = /* glsl */ `${common}
 precision highp sampler2DArray;
 
 uniform usampler2D uState;
 uniform sampler2DArray uTiles;
-uniform sampler2DArray uClips;
-uniform bool uHasClips;
-// Clip pages: (columns, tile px, gutter px, frames), and page side in px.
-uniform ivec4 uClipLayout;
-uniform float uPageSize;
 uniform float uCellPx;
 uniform bool uGridLines;
 uniform bool uWrap;
 uniform float uProgress;
+uniform float uTime;
 
 out vec4 outColor;
 
 ivec2 gridSize;
+vec2 st, gx, gy;
+// Bilinear weights of the 4 corner cells, and a sharpened version that is
+// close to each cell's own quarter.
+vec4 tent, own;
 
-uvec2 cellAt(ivec2 c) {
+uvec4 cellAt(ivec2 c) {
   if (uWrap) {
     c = (c + gridSize) % gridSize;
   } else if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, gridSize))) {
-    return uvec2(EMPTY);
+    return uvec4(EMPTY, EMPTY, CAUSE_NONE, 0u);
   }
-  return texelFetch(uState, c, 0).rg; // (current, previous)
+  return texelFetch(uState, c, 0);
 }
 
-// The cell's transition over the step, in tools/atlas/clips.py order:
-// empty, tree, grow, catch, burnout.
-uint transition(uvec2 s) {
-  if (s.x == EMPTY) return s.y == FIRE ? 4u : 0u;
-  if (s.x == TREE) return s.y == EMPTY ? 2u : 1u;
-  return 3u;
+float hashf(ivec2 i, uint salt) {
+  return float(hash3(uvec2(i), salt) & 0xffffffu) / 16777216.0;
 }
 
-vec3 clipFrame(uint clip, int frame, vec2 st, vec2 gx, vec2 gy) {
-  int cols = uClipLayout.x;
-  float tile = float(uClipLayout.y);
-  float slot = tile + 2.0 * float(uClipLayout.z);
-  vec2 origin = vec2(float(int(clip) % cols), float(int(clip) / cols)) * slot + float(uClipLayout.z);
-  float k = tile / uPageSize;
-  return textureGrad(uClips, vec3((origin + st * tile) / uPageSize, float(frame)), gx * k, gy * k).rgb;
+float vnoise(vec2 p, uint salt) {
+  ivec2 i = ivec2(floor(p));
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hashf(i, salt), hashf(i + ivec2(1, 0), salt), u.x),
+             mix(hashf(i + ivec2(0, 1), salt), hashf(i + ivec2(1, 1), salt), u.x), u.y);
+}
+
+float fbm(vec2 p, uint salt) {
+  return 0.5 * vnoise(p, salt) + 0.3 * vnoise(p * 2.03 + 17.1, salt) + 0.2 * vnoise(p * 4.07 + 31.7, salt);
+}
+
+vec4 corners(vec2 u) {
+  return vec4((1.0 - u.x) * (1.0 - u.y), u.x * (1.0 - u.y), (1.0 - u.x) * u.y, u.x * u.y);
+}
+
+// How far through the catching step (0 to 1) the fire front reaches a point
+// q in the cell, coming from the burning neighbors in the sources mask, or
+// spreading out from a random spot for lightning.
+float arrival(vec2 q, uvec4 t, ivec2 c) {
+  uint m = t.a;
+  if (t.b != CAUSE_SPREAD || m == 0u) {
+    vec2 o = 0.3 + 0.4 * vec2(hashf(c, 11u), hashf(c, 12u));
+    return length(q - o) / 0.95;
+  }
+  float a = 2.0;
+  if ((m & 1u) != 0u) a = min(a, q.x);
+  if ((m & 2u) != 0u) a = min(a, 1.0 - q.y);
+  if ((m & 4u) != 0u) a = min(a, 1.0 - q.x);
+  if ((m & 8u) != 0u) a = min(a, q.y);
+  if ((m & 16u) != 0u) a = min(a, length(q) * 0.7071);
+  if ((m & 32u) != 0u) a = min(a, length(q - vec2(0.0, 1.0)) * 0.7071);
+  if ((m & 64u) != 0u) a = min(a, length(q - vec2(1.0)) * 0.7071);
+  if ((m & 128u) != 0u) a = min(a, length(q - vec2(1.0, 0.0)) * 0.7071);
+  return a;
+}
+
+// One cell's look at this pixel: blending from \`from\` to \`to\` by w, plus
+// how much it lights its surroundings and the effects drawn on top.
+struct Corner {
+  uint from;
+  uint to;
+  float w;
+  float fire;
+  float ember;
+  float front;
+  float flash;
+};
+
+Corner corner(uvec4 t, ivec2 c, vec2 p, float s) {
+  Corner k = Corner(t.r, t.r, 0.0, 0.0, 0.0, 0.0, 0.0);
+  vec2 q = p - vec2(c);
+  vec2 qc = clamp(q, 0.0, 1.0);
+  float inside = smoothstep(-0.02, 0.02, min(min(q.x, q.y), min(1.0 - q.x, 1.0 - q.y)));
+  if (t.g == EMPTY && t.r == TREE) {
+    // Grows out from the middle of the cell.
+    float r = length(qc - 0.5) * 1.5 + (fbm(p * 3.0, 1u) - 0.5) * 0.4;
+    k.from = EMPTY;
+    k.w = smoothstep(r - 0.12, r + 0.12, s * 1.4 - 0.1);
+  } else if (t.g == TREE && t.r == FIRE) {
+    // The front crosses the cell over the step, ragged and glowing.
+    float a = arrival(qc, t, c) + (fbm(p * 2.5, 2u) - 0.5) * 0.3;
+    float f = s * 1.3 - 0.15;
+    k.from = TREE;
+    k.w = smoothstep(a - 0.05, a + 0.05, f);
+    k.fire = smoothstep(0.0, 0.8, s);
+    k.front = inside * exp(-pow((f - a) / 0.05, 2.0));
+    if (t.b == CAUSE_LIGHTNING) k.flash = inside * max(0.0, 1.0 - s / 0.12);
+  } else if (t.r == FIRE) {
+    k.fire = 1.0;
+  } else if (t.g == FIRE && t.r == BURNT) {
+    // Flames die out in patches, leaving charred trees and embers.
+    float n = fbm(p * 3.0, 3u);
+    k.from = FIRE;
+    k.w = smoothstep(n - 0.12, n + 0.12, s * 1.4 - 0.2);
+    k.fire = 1.0 - smoothstep(0.1, 0.9, s);
+    k.ember = smoothstep(0.2, 0.6, s);
+  } else if (t.g == BURNT && t.r == EMPTY) {
+    // Ash settles and grass comes back through it.
+    float n = fbm(p * 3.0, 4u);
+    k.from = BURNT;
+    k.w = smoothstep(n - 0.12, n + 0.12, s * 1.4 - 0.2);
+    k.ember = 0.6 * (1.0 - smoothstep(0.0, 0.5, s));
+  }
+  return k;
+}
+
+vec3 tile(uvec4 v) {
+  uint i = v.x + 3u * v.y + 9u * v.z + 27u * v.w;
+  return textureGrad(uTiles, vec3(st, float(i)), gx, gy).rgb;
+}
+
+// A tile for any 4 looks. BURNT corners take the TREE tile's trees, charred,
+// over the EMPTY tile's ground, scorched.
+vec3 shade(uvec4 v) {
+  bvec4 burnt = equal(v, uvec4(BURNT));
+  if (!any(burnt)) return tile(v);
+  uvec4 trees = v, bare = v;
+  for (int i = 0; i < 4; i++) {
+    if (burnt[i]) {
+      trees[i] = TREE;
+      bare[i] = EMPTY;
+    }
+  }
+  vec3 t = tile(trees);
+  vec3 g = tile(bare);
+  float canopy = smoothstep(0.06, 0.2, length(t - g));
+  float lum = dot(t, vec3(0.299, 0.587, 0.114));
+  vec3 charred = lum * vec3(0.42, 0.36, 0.32);
+  g *= 1.0 - 0.45 * dot(own, vec4(burnt));
+  return mix(g, charred, canopy);
 }
 
 void main() {
@@ -307,31 +324,64 @@ void main() {
   vec2 p = gl_FragCoord.xy / uCellPx;
   ivec2 v = ivec2(floor(p + 0.5));
   vec2 uv = p + 0.5 - vec2(v);
-
-  uvec2 sw = cellAt(v + ivec2(-1, -1));
-  uvec2 se = cellAt(v + ivec2(0, -1));
-  uvec2 nw = cellAt(v + ivec2(-1, 0));
-  uvec2 ne = cellAt(v + ivec2(0, 0));
-  uvec2 config = sw + 3u * se + 9u * nw + 27u * ne;
+  tent = corners(uv);
+  own = corners(smoothstep(0.3, 0.7, uv));
 
   // Atlas rows run top-down; gradients come from the continuous p so mip
   // selection doesn't spike at tile borders.
-  vec2 st = vec2(uv.x, 1.0 - uv.y);
-  vec2 gx = dFdx(p) * vec2(1.0, -1.0);
-  vec2 gy = dFdy(p) * vec2(1.0, -1.0);
-  float t = clamp(uProgress, 0.0, 1.0);
-  vec3 c;
-  if (uHasClips) {
-    uint clip = transition(sw) + 5u * transition(se) + 25u * transition(nw) + 125u * transition(ne);
-    float pos = t * float(uClipLayout.w - 1);
-    int f0 = int(pos);
-    int f1 = min(f0 + 1, uClipLayout.w - 1);
-    c = mix(clipFrame(clip, f0, st, gx, gy), clipFrame(clip, f1, st, gx, gy), fract(pos));
-  } else {
-    vec3 cur = textureGrad(uTiles, vec3(st, float(config.x)), gx, gy).rgb;
-    vec3 prev = textureGrad(uTiles, vec3(st, float(config.y)), gx, gy).rgb;
-    c = mix(prev, cur, smoothstep(0.0, 1.0, t));
+  st = vec2(uv.x, 1.0 - uv.y);
+  gx = dFdx(p) * vec2(1.0, -1.0);
+  gy = dFdy(p) * vec2(1.0, -1.0);
+  float s = clamp(uProgress, 0.0, 1.0);
+
+  const ivec2 offsets[4] = ivec2[4](ivec2(-1, -1), ivec2(0, -1), ivec2(-1, 0), ivec2(0, 0));
+  uvec4 from, to;
+  vec4 w, fire, ember;
+  float front = 0.0, flash = 0.0;
+  for (int i = 0; i < 4; i++) {
+    ivec2 c = v + offsets[i];
+    Corner k = corner(cellAt(c), c, p, s);
+    from[i] = k.from;
+    to[i] = k.to;
+    w[i] = k.w;
+    fire[i] = k.fire;
+    ember[i] = k.ember;
+    front += k.front;
+    flash += k.flash;
   }
+
+  // Multilinear blend over the corners that are mid-transition.
+  vec3 c = vec3(0.0);
+  float total = 0.0;
+  for (int m = 0; m < 16; m++) {
+    float wt = 1.0;
+    uvec4 look;
+    for (int i = 0; i < 4; i++) {
+      bool hi = ((m >> i) & 1) != 0;
+      bool moving = from[i] != to[i];
+      if (hi && !moving) {
+        wt = 0.0;
+        break;
+      }
+      look[i] = hi ? to[i] : from[i];
+      if (moving) wt *= hi ? w[i] : 1.0 - w[i];
+    }
+    if (wt < 0.002) continue;
+    c += wt * shade(look);
+    total += wt;
+  }
+  c /= total;
+
+  // Flames in the tiles dance, and fire lights up what's around it.
+  float dance = fbm(p * 5.0 + vec2(0.7, -2.3) * uTime, 6u);
+  float flames = smoothstep(0.3, 0.6, c.r - c.b) * smoothstep(0.45, 0.8, c.r);
+  c *= 1.0 + flames * (dance - 0.45) * 1.2;
+  float light = dot(tent, fire) * (0.6 + 0.8 * fbm(p * 1.5 + vec2(0.0, 0.8) * uTime, 5u));
+  c += c * light * vec3(0.8, 0.38, 0.1) + light * vec3(0.06, 0.02, 0.0);
+  c += front * vec3(1.0, 0.6, 0.2) * (0.7 + 0.6 * dance) * 1.3;
+  float sparks = smoothstep(0.72, 0.85, vnoise(p * 14.0, 7u)) * (0.3 + 0.7 * vnoise(p * 9.0 + vec2(1.3, -0.7) * uTime * 3.0, 8u));
+  c += dot(own, ember) * sparks * vec3(1.0, 0.35, 0.05) * 1.5;
+  c = mix(c, vec3(0.85, 0.9, 1.0), 0.8 * clamp(flash, 0.0, 1.0));
 
   if (uGridLines) {
     vec2 g = fract(p);

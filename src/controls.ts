@@ -36,7 +36,6 @@ const sliders: SliderSpec[] = [
 
 const renderers: { value: Renderer; label: string }[] = [
   { value: 'dual', label: 'Dual-grid tiles' },
-  { value: 'cells', label: 'Cell sprites (v0)' },
   { value: 'flat', label: 'Flat colors' },
 ];
 

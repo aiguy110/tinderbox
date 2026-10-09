@@ -16,7 +16,7 @@ export interface Params {
   /** Toroidal edges. */
   wrap: boolean;
   gridLines: boolean;
-  /** flat colors, v0 per-cell sprites, or dual-grid tiles (docs/PLAN.md). */
+  /** Flat colors or dual-grid tiles (docs/PLAN.md). */
   renderer: Renderer;
   paused: boolean;
   panelHidden: boolean;
@@ -40,7 +40,10 @@ const KEY = 'tinderbox:params';
 
 export function load(): Params {
   try {
-    return { ...defaults, ...JSON.parse(localStorage.getItem(KEY) ?? '{}'), paused: false };
+    const p: Params = { ...defaults, ...JSON.parse(localStorage.getItem(KEY) ?? '{}'), paused: false };
+    // Saved settings may name a renderer that has since been removed.
+    if (p.renderer !== 'flat') p.renderer = 'dual';
+    return p;
   } catch {
     return { ...defaults };
   }

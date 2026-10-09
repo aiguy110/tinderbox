@@ -1,16 +1,16 @@
-import { type Atlas, type ClipPages, type ClipsManifest, type TileAtlas, uploadAtlas } from './atlas';
-import { Cause, State, dualFrag, flatFrag, fullscreenVert, spriteFrag, stepFrag } from './shaders';
+import { type TileAtlas, uploadAtlas } from './atlas';
+import { Cause, State, dualFrag, flatFrag, fullscreenVert, stepFrag } from './shaders';
 
-export type Renderer = 'flat' | 'cells' | 'dual';
+export type Renderer = 'flat' | 'dual';
 
 export interface RenderOptions {
   gridLines: boolean;
   /** Falls back to flat until the renderer's atlas has loaded. */
   renderer: Renderer;
   wrap: boolean;
-  /** How far through the current step, 0 to 1. Drives transition clips. */
+  /** How far through the current step, 0 to 1. Drives transitions. */
   progress: number;
-  /** Seconds. Drives looping idle clips. */
+  /** Seconds. Drives flicker. */
   time: number;
 }
 
@@ -40,15 +40,11 @@ export class ForestFire {
   private current = 0;
   private stepProg: WebGLProgram;
   private flatProg: WebGLProgram;
-  private spriteProg: WebGLProgram;
   private dualProg: WebGLProgram;
   private stepU: Uniforms;
   private flatU: Uniforms;
-  private spriteU: Uniforms;
   private dualU: Uniforms;
-  private atlas: { tex: WebGLTexture; data: Atlas } | null = null;
   private tiles: WebGLTexture | null = null;
-  private clips: { tex: WebGLTexture; size: number; manifest: ClipsManifest } | null = null;
   private vao: WebGLVertexArrayObject;
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -57,16 +53,10 @@ export class ForestFire {
     this.gl = gl;
     this.stepProg = link(gl, fullscreenVert, stepFrag);
     this.flatProg = link(gl, fullscreenVert, flatFrag);
-    this.spriteProg = link(gl, fullscreenVert, spriteFrag);
     this.dualProg = link(gl, fullscreenVert, dualFrag);
     this.stepU = uniforms(gl, this.stepProg, ['uState', 'uSeed', 'uGrowth', 'uLightning', 'uMoore', 'uWrap']);
     this.flatU = uniforms(gl, this.flatProg, ['uState', 'uCellPx', 'uGridLines']);
-    this.spriteU = uniforms(gl, this.spriteProg, [
-      'uState', 'uAtlas', 'uCellPx', 'uGridLines', 'uProgress', 'uTime', 'uClipFrames', 'uClipSeconds',
-    ]);
-    this.dualU = uniforms(gl, this.dualProg, [
-      'uState', 'uTiles', 'uClips', 'uHasClips', 'uClipLayout', 'uPageSize', 'uCellPx', 'uGridLines', 'uWrap', 'uProgress',
-    ]);
+    this.dualU = uniforms(gl, this.dualProg, ['uState', 'uTiles', 'uCellPx', 'uGridLines', 'uWrap', 'uProgress', 'uTime']);
     this.vao = gl.createVertexArray()!;
   }
 
@@ -140,32 +130,16 @@ export class ForestFire {
     this.generation++;
   }
 
-  setAtlas(data: Atlas) {
-    if (this.atlas) this.gl.deleteTexture(this.atlas.tex);
-    this.atlas = { tex: uploadAtlas(this.gl, data), data };
-  }
-
   setTiles(data: TileAtlas) {
     if (this.tiles) this.gl.deleteTexture(this.tiles);
     this.tiles = uploadAtlas(this.gl, data);
   }
 
-  setClips(data: ClipPages) {
-    const gl = this.gl;
-    if (this.clips) gl.deleteTexture(this.clips.tex);
-    const tex = uploadAtlas(gl, { tile: data.size, layers: data.layers, pixels: data.pixels });
-    // Tiles sit side by side on a page; past this mip level their gutters
-    // are under a texel wide and neighbors would bleed in.
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAX_LOD, Math.max(0, Math.floor(Math.log2(data.manifest.gutter))));
-    this.clips = { tex, size: data.size, manifest: data.manifest };
-  }
-
   render(o: RenderOptions) {
     if (!this.buffers) return;
     const gl = this.gl;
-    const sprites = o.renderer === 'cells' && this.atlas;
     const dual = o.renderer === 'dual' && this.tiles;
-    const [prog, u] = sprites ? [this.spriteProg, this.spriteU] : dual ? [this.dualProg, this.dualU] : [this.flatProg, this.flatU];
+    const [prog, u] = dual ? [this.dualProg, this.dualU] : [this.flatProg, this.flatU];
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.useProgram(prog);
@@ -174,31 +148,13 @@ export class ForestFire {
     gl.uniform1i(u.uState, 0);
     gl.uniform1f(u.uCellPx, this.cellPx);
     gl.uniform1i(u.uGridLines, o.gridLines && this.cellPx >= 6 ? 1 : 0);
-    if (sprites) {
-      const { tex, data } = sprites;
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
-      gl.uniform1i(u.uAtlas, 1);
-      gl.uniform1f(u.uProgress, o.progress);
-      gl.uniform1f(u.uTime, o.time);
-      gl.uniform2iv(u.uClipFrames, data.clips.flatMap((c) => [c.first, c.frames]));
-      gl.uniform1fv(u.uClipSeconds, data.clips.map((c) => c.seconds));
-    }
     if (dual) {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, dual);
       gl.uniform1i(u.uTiles, 1);
       gl.uniform1i(u.uWrap, o.wrap ? 1 : 0);
       gl.uniform1f(u.uProgress, o.progress);
-      gl.uniform1i(u.uHasClips, this.clips ? 1 : 0);
-      if (this.clips) {
-        const { manifest: m } = this.clips;
-        gl.activeTexture(gl.TEXTURE2);
-        gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.clips.tex);
-        gl.uniform1i(u.uClips, 2);
-        gl.uniform4i(u.uClipLayout, m.columns, m.tile, m.gutter, m.frames);
-        gl.uniform1f(u.uPageSize, this.clips.size);
-      }
+      gl.uniform1f(u.uTime, o.time);
     }
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

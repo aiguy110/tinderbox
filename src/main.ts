@@ -1,11 +1,11 @@
 import './style.css';
-import { loadAtlas, loadClips, loadTiles } from './atlas';
+import { loadTiles } from './atlas';
 import { buildControls } from './controls';
 import { load, save } from './params';
 import { ForestFire } from './sim';
 
 const MAX_STEPS_PER_FRAME = 16;
-/** While paused, a manual step's transition clips play at most this fast. */
+/** While paused, a manual step's transitions play at most this fast. */
 const PAUSED_STEPS_PER_SECOND = 2;
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
@@ -39,19 +39,10 @@ function toggleFullscreen() {
   else document.documentElement.requestFullscreen();
 }
 
-const atlasSource = { cells: 'loading', dual: 'loading' };
-let atlasClips = false;
-loadAtlas().then((atlas) => {
-  sim.setAtlas(atlas);
-  atlasSource.cells = atlas.source;
-});
+let atlasSource = 'loading';
 loadTiles().then((tiles) => {
   sim.setTiles(tiles);
-  atlasSource.dual = tiles.source;
-});
-loadClips().then((clips) => {
-  if (clips) sim.setClips(clips);
-  atlasClips = !!clips;
+  atlasSource = tiles.source;
 });
 
 new ResizeObserver(() => sim.resize(params.cellSize, params.initialDensity)).observe(canvas);
@@ -83,7 +74,7 @@ canvas.addEventListener('pointerup', () => (igniting = false));
 
 let last = performance.now();
 // Fractional steps owed. After stepping, it's also how far we are through the
-// current step, which is what transition clips are timed by.
+// current step, which is what transitions are timed by.
 let debt = 0;
 let fps = 0;
 let statsAt = 0;
@@ -111,7 +102,7 @@ function frame(now: number) {
   if (now - statsAt > 250) {
     statsAt = now;
     controls.setStats(
-      `${sim.width}×${sim.height} cells · gen ${sim.generation.toLocaleString()} · ${fps.toFixed(0)} fps${params.renderer === 'flat' ? '' : ` · ${atlasSource[params.renderer]} atlas${params.renderer === 'dual' && atlasClips ? ' + clips' : ''}`}`,
+      `${sim.width}×${sim.height} cells · gen ${sim.generation.toLocaleString()} · ${fps.toFixed(0)} fps${params.renderer === 'flat' ? '' : ` · ${atlasSource} atlas`}`,
     );
   }
   requestAnimationFrame(frame);
