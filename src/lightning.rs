@@ -43,6 +43,7 @@ type Point = [f32; 2];
 
 /// Jag a straight line by midpoint displacement until segments are short.
 fn jag(rng: &mut Rng, a: Point, b: Point, rough: f32, min_len: f32) -> Vec<Point> {
+    let min_len = min_len.max(1.0);
     let mut pts = vec![a, b];
     loop {
         let mut next = vec![pts[0]];
@@ -74,7 +75,9 @@ fn add_path(segs: &mut Vec<Seg>, pts: &[Point], w: f32, reach0: f32, reach1: f32
 
 fn build_bolt(rng: &mut Rng, x: f32, y: f32, top: f32, scale: f32) -> Vec<Seg> {
     let mut segs = Vec::new();
-    let h = top - y;
+    // The top row of cells can stick out above the layout, so a strike there
+    // is above the top; a negative height would never stop jagging.
+    let h = (top - y).max(8.0 * scale);
     let start = [x + (rng.f32() - 0.5) * 0.5 * h, top + 8.0 * scale];
     // A few large kinks first so the channel wanders, then fine jaggedness.
     let coarse = jag(rng, start, [x, y], 0.5, h / 5.0);
