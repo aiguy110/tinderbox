@@ -129,7 +129,7 @@ A cell's content is drawn centered on a tile corner and never reaches more than 
 - **Max world size:** 1152² single-frame VACE fits the 3080; 1536² fails (`CUSOLVER_STATUS_INTERNAL_ERROR`, really OOM). A world pass takes about 100 s including model load.
 - **Wan's comfortable scale:** trees about 100–150 px across. At 64 px cells it draws mush.
 - **Video pass:** 768² × 17 frames fits in 10 GB only with `vae.enable_tiling()`, since the fp32 VAE encode runs out of memory otherwise. At about 3.6 s per step, a world takes about 2.5 min including load.
-- **Dev server:** `tinderbox-dev.service` (user unit, `tools/systemd/`) runs Vite from the main checkout on :5191. See CLAUDE.md.
+- **Live app:** `tinderbox-build.service` (user unit, `tools/systemd/`) runs `vite build --watch` in the main checkout. Tailscale serves `dist/` at `https://bifrost.tail2280a0.ts.net:8451/`. It replaced the old :5191 dev-server unit on 2026-10-08. See CLAUDE.md.
 - **GPU queue:** the generators queue at priority 0, so a named consumer (xad-pod, 30) can hold the GPU for 15–20 minutes at a time. That's expected. Check with `curl -s localhost:8080/api/queue`.
 - **Background jobs:** launch with `setsid nohup … < /dev/null & disown`, or the job dies with the agent session. Don't detect them with `pgrep -f clips.py`, which matches the shell running pgrep itself. Use `ps -eo args | grep "[.]venv/bin/python clips.py"`.
 - **Python venv:** `tools/atlas/.venv` (gitignored). Recreate it with `pip install -r tools/atlas/requirements.txt`.
