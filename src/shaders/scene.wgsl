@@ -160,7 +160,7 @@ fn tree_at(k: vec2<i32>, n: f32) -> Tree {
       * (1.0 - smoothstep(2.2 + 0.4 * tr.seed, 2.6 + 0.35 * tr.seed, f));
     tr.climb = smoothstep(0.0, 0.35, tau) * (1.0 - 0.55 * smoothstep(0.5, 1.6, tau));
   } else {
-    let fl = 3.8 + 3.5 * hashf(k, 26u);
+    let fl = 4.6 + 7.0 * hashf(k, 26u);
     tr.fall = select(-1.0, smoothstep(fl - 0.7, fl, f), f < fl);
   }
   return tr;

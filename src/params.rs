@@ -47,7 +47,9 @@ pub struct Params {
     /// Toroidal edges.
     pub wrap: bool,
     pub grid_lines: bool,
-    /// Steps for burnt ground to green back over.
+    /// Steps for burnt ground to green back over. Saved under a new key since
+    /// the default doubled, so old saves pick up the new default.
+    #[serde(rename = "regrowSteps")]
     pub regrow: f32,
     pub renderer: Renderer,
     /// Scene renderer: trees per cell side.
@@ -70,7 +72,7 @@ impl Default for Params {
             moore: false,
             wrap: true,
             grid_lines: true,
-            regrow: 10.0,
+            regrow: 20.0,
             renderer: Renderer::Scene,
             trees: 4.0,
             night: false,
