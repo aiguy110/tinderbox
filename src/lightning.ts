@@ -178,10 +178,10 @@ export class Lightning {
   }
 
   /** Strike at a point in canvas pixels (y up), timed from `now` in ms. */
-  strike(x: number, y: number, now: number) {
+  strike(x: number, y: number, now: number, pixelRatio: number) {
     if (this.bolts.length >= MAX_BOLTS) return;
     const gl = this.gl;
-    const scale = Math.max(1, window.devicePixelRatio || 1);
+    const scale = pixelRatio;
     const restrikes = [LEADER + 0.1 + 0.1 * Math.random()];
     if (Math.random() < 0.6) restrikes.push(restrikes[0] + 0.08 + 0.12 * Math.random());
     this.bolts.push({ born: now / 1000, segs: buildBolt(x, y, gl.drawingBufferHeight, scale), restrikes });

@@ -47,6 +47,9 @@ interface Buffer {
  */
 const BOLTS_PER_SECOND = 3;
 
+/** Phones report 3, which is 9× the pixels of 1× for little visible gain. */
+export const MAX_PIXEL_RATIO = 2;
+
 type Uniforms = Record<string, WebGLUniformLocation | null>;
 
 /** GPU ping-pong Drossel–Schwabl forest-fire simulation. */
@@ -55,6 +58,12 @@ export class ForestFire {
   width = 0;
   height = 0;
   cellPx = 1;
+  /**
+   * Canvas pixels per CSS pixel. Starts at the device's ratio (capped) and is
+   * lowered by the caller when frames are slow; the grid doesn't change.
+   */
+  pixelRatio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
+  private cellCssPx = 0;
   generation = 0;
 
   private buffers: [Buffer, Buffer] | null = null;
@@ -90,17 +99,18 @@ export class ForestFire {
    * new cells are seeded at `density`.
    */
   resize(cellCssPx: number, density: number) {
-    const dpr = window.devicePixelRatio || 1;
-    const pxW = Math.max(1, Math.round(this.canvas.clientWidth * dpr));
-    const pxH = Math.max(1, Math.round(this.canvas.clientHeight * dpr));
-    this.canvas.width = pxW;
-    this.canvas.height = pxH;
+    const r = this.pixelRatio;
+    const pxW = Math.max(1, Math.round(this.canvas.clientWidth * r));
+    const pxH = Math.max(1, Math.round(this.canvas.clientHeight * r));
+    // Setting the size clears the canvas, even to the same value.
+    if (this.canvas.width !== pxW) this.canvas.width = pxW;
+    if (this.canvas.height !== pxH) this.canvas.height = pxH;
 
-    const cellPx = Math.max(1, cellCssPx * dpr);
-    const w = Math.ceil(pxW / cellPx);
-    const h = Math.ceil(pxH / cellPx);
-    const cellChanged = cellPx !== this.cellPx;
-    this.cellPx = cellPx;
+    this.cellPx = Math.max(1, cellCssPx * r);
+    const w = Math.max(1, Math.ceil(this.canvas.clientWidth / cellCssPx));
+    const h = Math.max(1, Math.ceil(this.canvas.clientHeight / cellCssPx));
+    const cellChanged = cellCssPx !== this.cellCssPx;
+    this.cellCssPx = cellCssPx;
     if (w === this.width && h === this.height && this.buffers) return;
 
     const old = this.buffers ? { buf: this.buffers[this.current], w: this.width, h: this.height } : null;
@@ -229,9 +239,9 @@ export class ForestFire {
   /** Strike lightning at a canvas-relative CSS pixel position. */
   ignite(cssX: number, cssY: number): Strike | null {
     if (!this.buffers) return null;
-    const dpr = window.devicePixelRatio || 1;
-    const x = Math.floor((cssX * dpr) / this.cellPx);
-    const y = Math.floor((this.canvas.height - cssY * dpr) / this.cellPx);
+    const r = this.pixelRatio;
+    const x = Math.floor((cssX * r) / this.cellPx);
+    const y = Math.floor((this.canvas.height - cssY * r) / this.cellPx);
     if (x < 0 || y < 0 || x >= this.width || y >= this.height) return null;
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.buffers[this.current].tex);
