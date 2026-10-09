@@ -9,6 +9,7 @@ mod lightning;
 mod params;
 mod render;
 mod rng;
+mod save;
 #[cfg(target_os = "linux")]
 mod saver;
 mod shaders;

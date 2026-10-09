@@ -111,7 +111,7 @@ On several monitors the grid covers their bounding box, and each monitor shows i
 - `.` steps once
 - `Esc` quits (native)
 
-Click or drag to start fires. Settings, including whether the panel is hidden, are saved (localStorage on the web, `~/.config/tinderbox/params.json` natively).
+Click or drag to start fires. Settings, including whether the panel is hidden, are saved (localStorage on the web, `~/.config/tinderbox/params.json` natively). The forest itself is saved every few seconds and picks up where it left off (localStorage on the web, `~/.local/state/tinderbox/grid.bin` natively).
 
 ## Layout
 

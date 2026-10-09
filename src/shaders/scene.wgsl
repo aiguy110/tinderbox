@@ -160,7 +160,7 @@ fn tree_at(k: vec2<i32>, n: f32) -> Tree {
       * (1.0 - smoothstep(2.2 + 0.4 * tr.seed, 2.6 + 0.35 * tr.seed, f));
     tr.climb = smoothstep(0.0, 0.35, tau) * (1.0 - 0.55 * smoothstep(0.5, 1.6, tau));
   } else {
-    let fl = 4.6 + 7.0 * hashf(k, 26u);
+    let fl = 6.2 + 14.0 * hashf(k, 26u);
     tr.fall = select(-1.0, smoothstep(fl - 0.7, fl, f), f < fl);
   }
   return tr;
@@ -206,13 +206,21 @@ fn draw_pine(c0: vec3<f32>, tr: Tree, p: vec2<f32>, grow: f32, burnt: f32, flame
   // Needles burn away, leaving the snag's trunk and branches.
   let needles = vnoise(q * 16.0 + tr.seed * 37.0, 31u);
   crown *= smoothstep(burnt * 1.15 - 0.15, burnt * 1.15 - 0.05, needles);
-  let top = mix(0.3, 0.95, burnt);
-  let tw = 0.032 * (1.0 - 0.75 * v / top) + 0.004;
+  // The burnt skeleton: a thin trunk, snapped off below the old tip, and
+  // sparse, spindly branches, some broken short and some gone.
+  let bare = smoothstep(0.3, 0.9, burnt);
+  let top = mix(0.3, 0.82 + 0.12 * fract(tr.seed * 7.3), burnt);
+  let tw = (0.032 * (1.0 - 0.75 * v / top) + 0.004) * (1.0 - 0.35 * bare);
   let trunk = (1.0 - smoothstep(tw - aa, tw + aa, abs(u))) * step(0.0, v) * (1.0 - smoothstep(top - aa, top + aa, v));
-  let tb = fract(vv * tiers + abs(u) * 2.6);
+  let bx = vv * tiers + abs(u) * 2.6;
+  let tb = fract(bx);
   let bd = min(tb, 1.0 - tb) * 0.88 / tiers;
-  let branch = (1.0 - smoothstep(0.008, 0.008 + aa, bd)) * (1.0 - smoothstep(env * 0.8, env * 0.85 + 1e-4, abs(u)))
-    * step(0.0, vv) * smoothstep(0.3, 0.9, burnt);
+  let bid = vec2<i32>(i32(round(bx)), i32(tr.seed * 4096.0) * 2 + select(0, 1, u < 0.0));
+  let keep = step(0.35 * bare, hashf(bid, 36u));
+  let reach = env * mix(0.8, 0.3 + 0.5 * hashf(bid, 37u), bare);
+  let bw = mix(0.008, 0.006 * (1.0 - 0.6 * abs(u) / max(reach, 1e-3)), bare);
+  let branch = (1.0 - smoothstep(bw, bw + aa, bd)) * (1.0 - smoothstep(reach, reach + aa, abs(u)))
+    * step(0.0, vv) * step(v, top) * keep * bare;
   var wood = max(trunk, branch);
   if (fall > 0.0) {
     let bits = smoothstep(fall * 1.3 - 0.3, fall * 1.3 - 0.2, vnoise(q * 9.0 + tr.seed * 7.0, 32u));

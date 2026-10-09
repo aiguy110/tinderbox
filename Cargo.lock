@@ -2049,6 +2049,7 @@ dependencies = [
  "console_error_panic_hook",
  "egui",
  "egui-wgpu",
+ "miniz_oxide 0.8.9",
  "png",
  "pollster",
  "raw-window-handle",

@@ -362,6 +362,7 @@ impl Running {
             e.reseed();
         }
         e.params_changed();
+        e.autosave();
         if actions.fullscreen {
             self.toggle_fullscreen();
         }
@@ -481,6 +482,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let size = r.views[i].window.inner_size();
                     r.resized(i, size);
                 }
+                r.engine.resume();
                 r.views[0].window.request_redraw();
                 self.running = Some(r);
             }
@@ -525,6 +527,14 @@ impl ApplicationHandler<UserEvent> for App {
                 r.key(el, &event.logical_key);
             }
             _ => {}
+        }
+    }
+
+    /// Natively, save the grid on the way out, as well as every few seconds.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn exiting(&mut self, _el: &ActiveEventLoop) {
+        if let Some(r) = &mut self.running {
+            r.engine.save_now();
         }
     }
 }

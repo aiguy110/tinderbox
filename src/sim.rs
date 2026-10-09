@@ -62,6 +62,23 @@ struct Readback {
     status: Arc<AtomicU8>,
 }
 
+/// A copy of the grid on the CPU, for saving: rows of RGBA texels, y up.
+pub struct Snapshot {
+    pub width: u32,
+    pub height: u32,
+    pub generation: u64,
+    pub cells: Vec<u8>,
+}
+
+/// A grid being copied back for a snapshot.
+struct Capture {
+    buf: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    generation: u64,
+    status: Arc<AtomicU8>,
+}
+
 pub struct Sim {
     pub width: u32,
     pub height: u32,
@@ -78,6 +95,7 @@ pub struct Sim {
     probe_tex: wgpu::Texture,
     readbacks: Vec<Readback>,
     spare: Vec<wgpu::Buffer>,
+    capture: Option<Capture>,
     rng: Rng,
 }
 
@@ -146,6 +164,7 @@ impl Sim {
             probe_tex,
             readbacks: Vec::new(),
             spare: Vec::new(),
+            capture: None,
             rng: Rng::from_clock(),
         }
     }
@@ -297,6 +316,72 @@ impl Sim {
         Some(Strike { x, y })
     }
 
+    /// Start copying the grid back from the GPU; `captured()` has it once the
+    /// copy is mapped. Does nothing while a capture is already under way.
+    pub fn capture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let Some(b) = &self.buffers else { return };
+        if self.capture.is_some() {
+            return;
+        }
+        let (w, h) = (self.width, self.height);
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("grid capture"),
+            size: (row_bytes(w) * h) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            b[self.current].tex.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row_bytes(w)), rows_per_image: None },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        queue.submit([enc.finish()]);
+        let status = Arc::new(AtomicU8::new(0));
+        let s = status.clone();
+        buf.map_async(wgpu::MapMode::Read, .., move |r| s.store(if r.is_ok() { 1 } else { 2 }, Ordering::Release));
+        self.capture = Some(Capture { buf, width: w, height: h, generation: self.generation, status });
+    }
+
+    /// The grid from `capture()`, once it has arrived.
+    pub fn captured(&mut self) -> Option<Snapshot> {
+        let status = self.capture.as_ref()?.status.load(Ordering::Acquire);
+        if status == 0 {
+            return None;
+        }
+        let c = self.capture.take()?;
+        if status != 1 {
+            return None;
+        }
+        let row = (c.width * 4) as usize;
+        let cells = {
+            let data = c.buf.slice(..).get_mapped_range().ok()?;
+            data.chunks_exact(row_bytes(c.width) as usize).flat_map(|r| &r[..row]).copied().collect()
+        };
+        c.buf.unmap();
+        Some(Snapshot { width: c.width, height: c.height, generation: c.generation, cells })
+    }
+
+    /// Put a saved grid back. Where it's a different size, the overlap is
+    /// restored and the rest of the grid is left as it is.
+    pub fn restore(&mut self, queue: &wgpu::Queue, s: &Snapshot) {
+        let Some(b) = &self.buffers else { return };
+        let (w, h) = (s.width.min(self.width), s.height.min(self.height));
+        if w == 0 || h == 0 || s.cells.len() != (s.width * s.height * 4) as usize {
+            return;
+        }
+        queue.write_texture(
+            b[self.current].tex.as_image_copy(),
+            &s.cells,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(s.width * 4), rows_per_image: None },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.generation = s.generation;
+    }
+
     fn make_buffer(&self, device: &wgpu::Device, w: u32, h: u32) -> Buffer {
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("state"),
@@ -337,6 +422,12 @@ impl Sim {
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
     }
+}
+
+/// Bytes per row of a texture copied into a buffer, which must be a multiple
+/// of 256.
+fn row_bytes(w: u32) -> u32 {
+    (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
 }
 
 pub fn uniform_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {

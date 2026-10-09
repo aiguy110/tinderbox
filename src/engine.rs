@@ -6,6 +6,7 @@ use web_time::Instant;
 use crate::lightning::BoltUniforms;
 use crate::params::{Params, Renderer};
 use crate::render::{Pipelines, Rect, ViewTargets, ViewUniforms};
+use crate::save;
 use crate::shaders::hashf;
 use crate::sim::{Sim, StepParams, Strike};
 
@@ -17,6 +18,8 @@ pub const MAX_PIXEL_RATIO: f64 = 2.0;
 const MIN_PIXEL_RATIO: f64 = 0.5;
 const SLOW_FPS: f64 = 40.0;
 const FAST_FPS: f64 = 57.0;
+/// How often the app saves the grid (see save.rs).
+const SAVE_SECS: f64 = 5.0;
 
 /// Where the views sit. The grid covers the bounding box of all of them;
 /// cells in gaps between monitors are simulated but not seen.
@@ -67,6 +70,7 @@ pub struct Engine {
     pub pixel_ratio: f64,
     adapt: Adapt,
     bolts: bool,
+    saved_at: Instant,
 }
 
 /// Lower the render resolution while frames are slow, and creep back up after
@@ -107,6 +111,7 @@ impl Engine {
             pixel_ratio: 1.0,
             adapt: Adapt::default(),
             bolts: false,
+            saved_at: now,
         };
         e.reset_resolution();
         e.fit_grid();
@@ -164,6 +169,38 @@ impl Engine {
             self.params.save();
         }
         self.saved = self.params.clone();
+    }
+
+    /// Pick up the grid an earlier run saved, if it used the same cell size.
+    /// Call once the layout has settled, so none of it is cropped away.
+    pub fn resume(&mut self) {
+        if let Some((s, cell_size)) = save::load()
+            && cell_size == self.cell_size
+        {
+            self.sim.restore(&self.queue, &s);
+        }
+    }
+
+    /// Save the grid every few seconds. Call once a frame; the copy back from
+    /// the GPU arrives a frame or so later.
+    pub fn autosave(&mut self) {
+        if let Some(s) = self.sim.captured() {
+            save::store(&s, self.cell_size);
+        }
+        if self.saved_at.elapsed().as_secs_f64() >= SAVE_SECS {
+            self.saved_at = Instant::now();
+            self.sim.capture(&self.device, &self.queue);
+        }
+    }
+
+    /// Save the grid now, waiting for the GPU.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_now(&mut self) {
+        self.sim.capture(&self.device, &self.queue);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        if let Some(s) = self.sim.captured() {
+            save::store(&s, self.cell_size);
+        }
     }
 
     pub fn reseed(&mut self) {
