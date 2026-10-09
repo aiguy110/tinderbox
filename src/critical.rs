@@ -18,8 +18,12 @@ const N4: [(f64, f64, f64); 4] = [
     (1e-3, -1.716, 0.5913),
     (3e-3, 0.815, 0.3248),
 ];
-// Not measured yet; the 4-neighbor fit stands in.
-const N8: [(f64, f64, f64); 4] = N4;
+const N8: [(f64, f64, f64); 4] = [
+    (1e-4, -7.535, 1.0015),
+    (3e-4, -5.650, 0.8708),
+    (1e-3, -1.248, 0.4667),
+    (3e-3, 0.359, 0.2640),
+];
 
 /// Returns (growth, lightning) on the curve for a grid of `cells` cells.
 pub fn lock(growth: f32, cells: u32, moore: bool) -> (f32, f32) {
