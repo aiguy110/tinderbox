@@ -13,7 +13,7 @@ const MAX_STEPS_PER_FRAME: u32 = 16;
 /// While paused, a manual step's transitions play at most this fast.
 const PAUSED_STEPS_PER_SECOND: f32 = 2.0;
 /// Phones report 3, which is 9× the pixels of 1× for little visible gain.
-const MAX_PIXEL_RATIO: f64 = 2.0;
+pub const MAX_PIXEL_RATIO: f64 = 2.0;
 const MIN_PIXEL_RATIO: f64 = 0.5;
 const SLOW_FPS: f64 = 40.0;
 const FAST_FPS: f64 = 57.0;

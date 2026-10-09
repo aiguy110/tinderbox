@@ -84,7 +84,9 @@ impl EguiInput {
         }
     }
 
-    pub fn take(&mut self, window: &Window) -> egui::RawInput {
+    /// `surface_ppp` is the surface's pixels per point, which can be less
+    /// than the window's.
+    pub fn take(&mut self, window: &Window, surface_ppp: f32) -> egui::RawInput {
         let ppp = window.scale_factor() as f32;
         let size = window.inner_size();
         let mut raw = egui::RawInput {
@@ -95,7 +97,7 @@ impl EguiInput {
             ..Default::default()
         };
         if let Some(v) = raw.viewports.get_mut(&egui::ViewportId::ROOT) {
-            v.native_pixels_per_point = Some(ppp);
+            v.native_pixels_per_point = Some(surface_ppp);
         }
         raw
     }

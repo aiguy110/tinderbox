@@ -112,10 +112,7 @@ impl Sim {
             layout: &uniform_layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("step"),
-            source: wgpu::ShaderSource::Wgsl(shaders::step().into()),
-        });
+        let module = shaders::module(device, "step", shaders::step());
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("step"),
             bind_group_layouts: &[Some(&state_layout), Some(&uniform_layout)],

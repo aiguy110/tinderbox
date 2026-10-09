@@ -16,7 +16,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Fullscreen, Window, WindowId};
 
-use crate::engine::{Engine, Layout};
+use crate::engine::{Engine, Layout, MAX_PIXEL_RATIO};
 use crate::input::{self, EguiInput};
 use crate::params::Params;
 use crate::render::{Rect, ViewTargets};
@@ -274,11 +274,22 @@ impl Running {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        // A window that isn't a whole monitor (the browser canvas, mostly)
+        // gets a surface of at most MAX_PIXEL_RATIO per logical pixel, like
+        // the scene: at a phone's 3×, the blit, panel and present passes cost
+        // 2.25× as much for nothing visible.
+        let (size, scale) = if self.follows_window {
+            let s = v.window.scale_factor();
+            let k = s.min(MAX_PIXEL_RATIO);
+            let fit = |n: u32| ((n as f64 * k / s).round() as u32).max(1);
+            (PhysicalSize::new(fit(size.width), fit(size.height)), k)
+        } else {
+            (size, v.window.scale_factor())
+        };
         v.config.width = size.width;
         v.config.height = size.height;
         v.surface.configure(&self.engine.device, &v.config);
         if self.follows_window {
-            let scale = v.window.scale_factor();
             let views = vec![Rect { x: 0, y: 0, w: size.width, h: size.height }];
             v.rect = views[0];
             self.engine.set_layout(Layout { views, scale });
@@ -288,8 +299,11 @@ impl Running {
     /// Strike lightning under a pointer at `pos` in view `i`'s window.
     fn ignite(&mut self, i: usize, pos: PhysicalPosition<f64>, dragging: bool) {
         let v = &self.views[i];
-        let gx = v.rect.x as f64 + pos.x * v.rect.w as f64 / v.config.width as f64;
-        let gy = v.rect.y as f64 + pos.y * v.rect.h as f64 / v.config.height as f64;
+        // Pointer positions are in the window's pixels, which may be more
+        // than the surface's.
+        let win = v.window.inner_size();
+        let gx = v.rect.x as f64 + pos.x * v.rect.w as f64 / win.width.max(1) as f64;
+        let gy = v.rect.y as f64 + pos.y * v.rect.h as f64 / win.height.max(1) as f64;
         let bolt = !dragging || self.bolt_at.is_none_or(|t| t.elapsed().as_secs_f32() > DRAG_BOLT_SECS);
         if self.engine.ignite(gx, gy, bolt) && bolt {
             self.bolt_at = Some(Instant::now());
@@ -334,7 +348,8 @@ impl Running {
         let primary = views[0].window.clone();
         let stats = e.stats(views.len(), &self.backend);
         let mut actions = ui::Actions::default();
-        let raw = egui_input.take(&primary);
+        let surface_ppp = views[0].config.width as f32 * primary.scale_factor() as f32 / primary.inner_size().width.max(1) as f32;
+        let raw = egui_input.take(&primary, surface_ppp);
         let out = egui_ctx.run_ui(raw, |ui| actions = ui::panel(ui.ctx(), &mut e.params, &stats, HINT));
         if out.platform_output.cursor_icon != self.cursor_icon {
             self.cursor_icon = out.platform_output.cursor_icon;

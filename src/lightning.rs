@@ -124,10 +124,7 @@ pub struct Lightning {
 
 impl Lightning {
     pub fn new(device: &wgpu::Device, scene_format: wgpu::TextureFormat) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("lightning"),
-            source: wgpu::ShaderSource::Wgsl(shaders::lightning().into()),
-        });
+        let module = shaders::module(device, "lightning", shaders::lightning());
         let uniform_layout = uniform_layout(device, "bolt uniforms");
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bolts"),

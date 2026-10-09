@@ -54,6 +54,19 @@ fn prelude() -> String {
     s + include_str!("shaders/common.wgsl")
 }
 
+/// Compile a WGSL module. On the web, naga's bounds checks are dropped: in
+/// WebGL2 it would clamp every texel fetch and array index (a textureSize call
+/// per fetch, in the hottest loops), and the browser already makes
+/// out-of-bounds access safe. WebGPU compiles the WGSL itself, unaffected.
+pub fn module(device: &wgpu::Device, label: &str, src: String) -> wgpu::ShaderModule {
+    let desc = wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(src.into()) };
+    #[cfg(target_arch = "wasm32")]
+    // SAFETY: WebGL2 and WebGPU guarantee out-of-bounds accesses are defined.
+    return unsafe { device.create_shader_module_trusted(desc, wgpu::ShaderRuntimeChecks::unchecked()) };
+    #[cfg(not(target_arch = "wasm32"))]
+    device.create_shader_module(desc)
+}
+
 pub fn step() -> String {
     prelude() + include_str!("shaders/step.wgsl")
 }

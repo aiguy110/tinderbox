@@ -82,9 +82,7 @@ impl Pipelines {
             bind_group_layouts: &[Some(&sim.state_layout), Some(&view_layout)],
             immediate_size: 0,
         });
-        let module = |label, src: String| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(src.into()) })
-        };
+        let module = |label, src| shaders::module(device, label, src);
         let scene = fullscreen_pipeline(device, &layout, &module("scene", shaders::scene()), "fs", SCENE_FORMAT, None);
         let flat = fullscreen_pipeline(device, &layout, &module("flat", shaders::flat()), "fs", SCENE_FORMAT, None);
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
