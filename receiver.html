@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>tinderbox receiver</title>
+    <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+      iframe { border: 0; width: 100vw; height: 100vh; display: block; }
+    </style>
+  </head>
+  <body>
+    <iframe src="./index.html" allow="autoplay; fullscreen"></iframe>
+    <script>
+      // No media to play: just keep the receiver alive and show the sim.
+      const ctx = cast.framework.CastReceiverContext.getInstance();
+      const opts = new cast.framework.CastReceiverOptions();
+      opts.disableIdleTimeout = true;
+      ctx.start(opts);
+    </script>
+  </body>
+</html>
