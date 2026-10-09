@@ -103,7 +103,7 @@ struct Shade {
 fn ground_color(g: Ground, p: vec2<f32>) -> Shade {
   let tex = vnoise(p * 34.0, 80u);
   let dirt = mix(vec3<f32>(0.30, 0.22, 0.14), vec3<f32>(0.40, 0.30, 0.19), fbm(p * 3.0, 81u)) * (0.88 + 0.24 * tex);
-  var grass = mix(vec3<f32>(0.19, 0.36, 0.09), vec3<f32>(0.33, 0.52, 0.14), fbm(p * 2.0, 82u));
+  var grass = mix(vec3<f32>(0.21, 0.40, 0.10), vec3<f32>(0.36, 0.57, 0.16), fbm(p * 2.0, 82u));
   grass *= 0.78 + 0.38 * vnoise(p * vec2<f32>(60.0, 30.0), 83u);
   let litter = mix(vec3<f32>(0.13, 0.11, 0.06), vec3<f32>(0.22, 0.17, 0.09), vnoise(p * 14.0, 84u)) * (0.85 + 0.3 * tex);
   let ash = mix(vec3<f32>(0.06, 0.055, 0.05), vec3<f32>(0.24, 0.23, 0.22), smoothstep(0.5, 0.75, fbm(p * 9.0, 85u)));
@@ -160,7 +160,8 @@ fn tree_at(k: vec2<i32>, n: f32) -> Tree {
       * (1.0 - smoothstep(2.2 + 0.4 * tr.seed, 2.6 + 0.35 * tr.seed, f));
     tr.climb = smoothstep(0.0, 0.35, tau) * (1.0 - 0.55 * smoothstep(0.5, 1.6, tau));
   } else {
-    let fl = 6.2 + 14.0 * hashf(k, 26u);
+    // Ground age saturates at 254 steps, so snags must fall before then.
+    let fl = 3.0 + min(view.snag * (0.3 + 1.4 * hashf(k, 26u)), 250.0);
     tr.fall = select(-1.0, smoothstep(fl - 0.7, fl, f), f < fl);
   }
   return tr;
@@ -232,8 +233,8 @@ fn draw_pine(c0: vec3<f32>, tr: Tree, p: vec2<f32>, grow: f32, burnt: f32, flame
   let bark = mix(vec3<f32>(0.24, 0.15, 0.08), charred, smoothstep(0.2, 0.7, burnt));
   c = mix(c, bark * lit * select(0.7, 1.0, u < 0.0), wood);
 
-  var green = mix(vec3<f32>(0.05, 0.16, 0.07), vec3<f32>(0.10, 0.25, 0.09), tr.seed);
-  green = mix(vec3<f32>(0.20, 0.40, 0.11), green, smoothstep(0.3, 1.0, grow));
+  var green = mix(vec3<f32>(0.09, 0.26, 0.11), vec3<f32>(0.16, 0.38, 0.14), tr.seed);
+  green = mix(vec3<f32>(0.24, 0.47, 0.13), green, smoothstep(0.3, 1.0, grow));
   let side = clamp(-u / max(env, 1e-3), -1.0, 1.0);
   var shade = (0.8 + 0.28 * side) * (0.7 + 0.45 * (1.0 - smoothstep(0.3, 1.0, tt))) * (0.75 + 0.25 * smoothstep(0.0, 0.5, v));
   shade *= 0.8 + 0.4 * vnoise(q * 70.0 + tr.seed * 13.0, 33u);

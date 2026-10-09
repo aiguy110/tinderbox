@@ -27,7 +27,8 @@ pub struct ViewUniforms {
     pub wrap: u32,
     pub trees: i32,
     pub night: u32,
-    pub _pad: [u32; 3],
+    pub snag: f32,
+    pub _pad: [u32; 2],
 }
 
 /// A rectangle of the layout in global physical pixels, y down (as monitors

@@ -111,7 +111,8 @@ pub fn panel(ctx: &egui::Context, p: &mut Params, stats: &str, hint: &str) -> Ac
                 slider(ui, "Lightning f", &mut p.lightning, 1e-8..=0.1, true, 0.0, sci);
                 slider(ui, "Speed", &mut p.steps_per_second, 0.1..=480.0, true, 0.0, speed);
                 slider(ui, "Trees per side", &mut p.trees, 1.0..=8.0, false, 1.0, |v| format!("{} per cell", v * v));
-                slider(ui, "Regrowth", &mut p.regrow, 1.0..=60.0, false, 1.0, |v| format!("{v} steps"));
+                slider(ui, "Regrowth", &mut p.regrow, 1.0..=240.0, true, 1.0, |v| format!("{v} steps"));
+                slider(ui, "Snag life", &mut p.snag, 1.0..=120.0, true, 1.0, |v| format!("{v} steps"));
                 slider(ui, "Seed density", &mut p.initial_density, 0.0..=1.0, false, 0.01, |v| format!("{}%", (v * 100.0).round()));
                 ui.label(RichText::new(format!("p/f ≈ {}", (p.growth / p.lightning).round())).small().color(DIM));
 

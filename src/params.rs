@@ -51,6 +51,8 @@ pub struct Params {
     /// the default doubled, so old saves pick up the new default.
     #[serde(rename = "regrowSteps")]
     pub regrow: f32,
+    /// Scene renderer: average steps a snag stands after its cell clears.
+    pub snag: f32,
     pub renderer: Renderer,
     /// Scene renderer: trees per cell side.
     pub trees: f32,
@@ -73,6 +75,7 @@ impl Default for Params {
             wrap: true,
             grid_lines: true,
             regrow: 20.0,
+            snag: 10.0,
             renderer: Renderer::Scene,
             trees: 4.0,
             night: false,

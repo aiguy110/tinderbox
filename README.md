@@ -105,7 +105,7 @@ trunk build --release                   # web build into dist/
 
 On several monitors the grid covers their bounding box, and each monitor shows its own part of it, so fires burn across the seams. Cells are sized in the primary monitor's logical pixels.
 
-**Controls:** use the panel to set cell size, trees per cell, p, f, speed, regrowth time, seed density, neighborhood, edge wrap, and day or night. The scene renderer wants big, slow cells: try 48–96 px and 3–5 s per step. Keys:
+**Controls:** use the panel to set cell size, trees per cell, p, f, speed, regrowth time, snag life, seed density, neighborhood, edge wrap, and day or night. The scene renderer wants big, slow cells: try 48–96 px and 3–5 s per step. Keys:
 
 - `H` or the × / ☰ buttons hide and show the panel
 - `F` toggles fullscreen (web and `--windowed`)
@@ -145,7 +145,7 @@ The default renderer draws everything in the fragment shader, with no art assets
 - **Catching:** each tree ignites when the fire front reaches it, so a stand lights up in order from the side the fire came from (or outward from the strike, for lightning).
 - **Burning:** flames flare up each crown, lean with the wind and flicker, then die back as the needles scorch and burn away. Sparks rise on the wind and smoke drifts off.
 - **Burnt:** flames go out tree by tree, leaving charred snags with glowing embers on ash.
-- **Afterwards:** snags stand for a few steps, then tip and crumble. The ash washes into the dirt, and grass grows back in patches over Regrowth steps.
+- **Afterwards:** snags stand for about Snag life steps (default 10), then tip and crumble. The ash washes into the dirt, and grass grows back in patches over Regrowth steps.
 
 **Night** switches to moonlight, so fires light up their surroundings. The design is in [docs/PLAN.md](docs/PLAN.md).
 

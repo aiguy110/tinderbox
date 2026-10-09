@@ -22,7 +22,8 @@ struct View {
   // Scene renderer: trees per cell side, already capped for small cells.
   trees: i32,
   night: u32,
-  _pad0: u32,
+  // Scene renderer: average steps a snag stands after its cell clears.
+  snag: f32,
   _pad1: u32,
   _pad2: u32,
 }

@@ -310,6 +310,7 @@ impl Engine {
             target_h: th as f32,
             cell_px: cell,
             regrow: p.regrow.max(1.0),
+            snag: p.snag.max(0.0),
             progress: self.debt.clamp(0.0, 1.0),
             // Wrapped so flicker keeps f32 precision in a long-running show.
             time: (self.seconds() % 10_000.0) as f32,
@@ -318,7 +319,7 @@ impl Engine {
             // Keep trees at least 4 px apart.
             trees: (p.trees.round() as i32).min((cell_rendered / 4.0).floor() as i32).max(1),
             night: p.night as u32,
-            _pad: [0; 3],
+            _pad: [0; 2],
         };
         let bu = BoltUniforms { origin, size: [r.w as f32, r.h as f32], sky: self.pipelines.lightning.sky, _pad: [0.0; 3] };
         let renderer = if p.renderer == Renderer::Flat { Renderer::Flat } else { Renderer::Scene };
