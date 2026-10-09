@@ -38,6 +38,9 @@ pub struct Params {
     pub growth: f32,
     /// f: probability per step that a tree is struck by lightning.
     pub lightning: f32,
+    /// Derive lightning from growth and the grid size, on the curve where
+    /// fire sizes are closest to a power law (see critical.rs).
+    pub critical: bool,
     /// Simulation steps per second.
     pub steps_per_second: f32,
     /// Tree density used when (re)seeding.
@@ -69,6 +72,7 @@ impl Default for Params {
             cell_size: 3.0,
             growth: 0.01,
             lightning: 0.00001,
+            critical: false,
             steps_per_second: 60.0,
             initial_density: 0.5,
             moore: false,

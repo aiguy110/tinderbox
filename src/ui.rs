@@ -108,13 +108,19 @@ pub fn panel(ctx: &egui::Context, p: &mut Params, stats: &str, hint: &str) -> Ac
 
                 slider(ui, "Cell size", &mut p.cell_size, 1.0..=128.0, false, 1.0, |v| format!("{v}px"));
                 slider(ui, "Growth p", &mut p.growth, 1e-5..=1.0, true, 0.0, sci);
-                slider(ui, "Lightning f", &mut p.lightning, 1e-8..=0.1, true, 0.0, sci);
+                ui.add_enabled_ui(!p.critical, |ui| slider(ui, "Lightning f", &mut p.lightning, 1e-8..=0.1, true, 0.0, sci));
                 slider(ui, "Speed", &mut p.steps_per_second, 0.1..=480.0, true, 0.0, speed);
                 slider(ui, "Trees per side", &mut p.trees, 1.0..=8.0, false, 1.0, |v| format!("{} per cell", v * v));
                 slider(ui, "Regrowth", &mut p.regrow, 1.0..=240.0, true, 1.0, |v| format!("{v} steps"));
                 slider(ui, "Snag life", &mut p.snag, 1.0..=120.0, true, 1.0, |v| format!("{v} steps"));
                 slider(ui, "Seed density", &mut p.initial_density, 0.0..=1.0, false, 0.01, |v| format!("{}%", (v * 100.0).round()));
-                ui.label(RichText::new(format!("p/f ≈ {}", (p.growth / p.lightning).round())).small().color(DIM));
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut p.critical, "Lock to critical")
+                        .on_hover_text("Set lightning from growth and the grid size, where fire sizes come closest to a power law. Caps growth too: faster regrowth lets fires burn back into their own wake.");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(format!("p/f ≈ {}", (p.growth / p.lightning).round())).small().color(DIM));
+                    });
+                });
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {

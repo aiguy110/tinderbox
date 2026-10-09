@@ -4,6 +4,9 @@
 
 mod app;
 mod awake;
+#[cfg(not(target_arch = "wasm32"))]
+mod bench;
+mod critical;
 mod engine;
 mod input;
 mod lightning;
@@ -37,6 +40,7 @@ fn main() {
 const USAGE: &str = "\
 usage: tinderbox [options]
        tinderbox update [--force]
+       tinderbox bench [--help]
 
   (no options)        span the scene across every monitor, fullscreen
   --monitors 0,2      span only these monitors
@@ -54,6 +58,8 @@ usage: tinderbox [options]
                       XSCREENSAVER_WINDOW, for xsecurelock or xscreensaver
       --window-id ID         draw into this X window instead
 
+  bench               measure how scale-free fires are for given settings
+                      (CPU only; see tinderbox bench --help)
   update              replace this binary with the latest GitHub release
                       (--force reinstalls it even if it's not newer)
   --version           print the version
@@ -64,6 +70,13 @@ Keys: H hides the panel, F toggles fullscreen (windowed), Space pauses,
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "bench") {
+        if let Err(e) = bench::main(&args[1..]) {
+            eprintln!("tinderbox bench: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
         return;

@@ -3,6 +3,7 @@
 
 use web_time::Instant;
 
+use crate::critical;
 use crate::lightning::BoltUniforms;
 use crate::params::{Params, Renderer};
 use crate::render::{Pipelines, Rect, ViewTargets, ViewUniforms};
@@ -149,10 +150,20 @@ impl Engine {
         let fresh = self.params.cell_size != self.cell_size;
         self.cell_size = self.params.cell_size;
         self.sim.resize(&self.device, &self.queue, gw, gh, self.params.initial_density, fresh);
+        self.lock_critical();
+    }
+
+    /// With the lock on, growth is capped and lightning follows from it.
+    fn lock_critical(&mut self) {
+        let p = &mut self.params;
+        if p.critical {
+            (p.growth, p.lightning) = critical::lock(p.growth, self.sim.width * self.sim.height, p.moore);
+        }
     }
 
     /// Call after the panel (or a key) may have changed params.
     pub fn params_changed(&mut self) {
+        self.lock_critical();
         if self.params == self.saved {
             return;
         }
