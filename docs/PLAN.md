@@ -237,7 +237,7 @@ The M2 recipe with five looks, so 625 configurations:
 
 ## Log
 
-- **2026-10-09 (night):** the river (see *River*). Also fixed a web crash, independent of the river: a lightning strike in the top row of cells, which sticks out above the layout, gave a bolt of negative height, and `lightning::jag` subdivided forever ("capacity overflow"). For wasm panics, a debug `trunk build` plus `Error.stackTraceLimit = 200` gives a symbolized stack.
+- **2026-10-09 (night):** the river (see *River*). Released v0.9.0. Also fixed a web crash, independent of the river: a lightning strike in the top row of cells, which sticks out above the layout, gave a bolt of negative height, and `lightning::jag` subdivided forever ("capacity overflow"). For wasm panics, a debug `trunk build` plus `Error.stackTraceLimit = 200` gives a symbolized stack.
 
 - **2026-10-09 (late evening):** `tinderbox bench` and Lock to critical (see *Criticality*). Released v0.8.0.
 - **2026-10-09 (afternoon):** `tinderbox update` (`src/update.rs`) installs the latest GitHub release over the running binary via system `curl` and `tar` (no HTTP/TLS crates), renaming over it (on Windows the running exe is renamed to `.old` first and removed on the next update); `--force` reinstalls. Also `--version`. Tested on Linux with `--force` against v0.4.0, including through a symlink; macOS and Windows untested. Released v0.5.0.
