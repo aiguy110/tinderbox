@@ -13,13 +13,17 @@
 //! trench fills back up (fast near the channel, as point bars; slowly
 //! elsewhere, as silt) and rounds out. Only the texels below the surface are
 //! tracked for that, so the upkeep is cheap.
+//!
+//! Beside the heights, each texel has a *hardness* (0 to 1): the clay that a
+//! lake bed leaves behind when it dries, which the river is slow to cut
+//! through. It decays over many lake lifetimes.
 
 use serde::{Deserialize, Serialize};
 
 use crate::rng::Rng;
 
 /// Tilt of the surface downstream, in cells per cell.
-const DOWNSTREAM: f32 = 3e-4;
+pub const DOWNSTREAM: f32 = 3e-4;
 /// Flat valley floor, in widths wide in total (at most `FLOOR_FRAC` of the
 /// grid's height).
 const FLOOR_WIDTHS: f32 = 24.0;
@@ -35,7 +39,7 @@ const HILLS: f32 = 0.4;
 /// Depth of the channel's bed below the surface, in widths.
 pub const DEPTH: f32 = 0.3;
 /// Texels below the surface by less than this don't count as pits.
-const EPS: f32 = 0.02;
+pub const EPS: f32 = 0.02;
 /// Fill rates below the surface, in widths per river-clock step: within
 /// `NEAR` widths of the channel (point bars), and elsewhere (silt). The slow
 /// rate empties a bed in about `LAKE_LIFE` steps.
@@ -44,7 +48,9 @@ const SILT_FILL: f32 = DEPTH / crate::river::LAKE_LIFE as f32;
 const NEAR: f32 = 2.0;
 /// Clock steps for a pit's edges to smooth by about a quarter toward their
 /// neighbors.
-const SMOOTH_TIME: f32 = 600.0;
+const SMOOTH_TIME: f32 = 3000.0;
+/// Clay plugs soften with this time constant, in river-clock steps.
+const CLAY_LIFE: f64 = 5.0 * crate::river::LAKE_LIFE;
 /// Quantization of saved heights: steps per cell.
 const QUANT: f32 = 64.0;
 /// Most texels in the grid.
@@ -70,6 +76,11 @@ pub struct Terrain {
     pits: Vec<u32>,
     /// Scratch: 1 within `NEAR` widths of the channel, 2 under it.
     near: Vec<u8>,
+    /// Clay, 0 to 1, a texel each.
+    hardness: Vec<f32>,
+    /// Texels of a lake the channel is connected to: the channel doesn't
+    /// silt them up fast, since it flows in rather than past.
+    backwater: Vec<bool>,
 }
 
 /// What's saved: the texels are quantized, deflated, and in base64.
@@ -79,6 +90,9 @@ pub struct Saved {
     width: f32,
     min: f32,
     heights: String,
+    /// Hardness in 1/255ths, delta-coded like the heights.
+    #[serde(default)]
+    hardness: String,
 }
 
 impl Terrain {
@@ -128,6 +142,8 @@ impl Terrain {
             half,
             pits: Vec::new(),
             near: Vec::new(),
+            hardness: vec![0.0; tw * th],
+            backwater: vec![false; tw * th],
         }
     }
 
@@ -191,6 +207,79 @@ impl Terrain {
         })
     }
 
+    /// Texels across and up.
+    pub fn dims(&self) -> (usize, usize) {
+        (self.tw, self.th)
+    }
+
+    /// A texel's size in cells.
+    pub fn texel(&self) -> (f32, f32) {
+        (self.cx, self.cy)
+    }
+
+    /// The texel nearest a point in cells.
+    pub fn index_at(&self, x: f32, y: f32) -> usize {
+        let ix = ((x / self.cx).floor() as i64).rem_euclid(self.tw as i64) as usize;
+        let iy = ((y / self.cy).floor().max(0.0) as usize).min(self.th - 1);
+        iy * self.tw + ix
+    }
+
+    /// The four texels beside texel `i` (the same one where the grid ends).
+    pub fn neighbors(&self, i: usize) -> [usize; 4] {
+        let (ix, iy) = (i % self.tw, i / self.tw);
+        let row = iy * self.tw;
+        [
+            row + (ix + 1) % self.tw,
+            row + (ix + self.tw - 1) % self.tw,
+            iy.saturating_sub(1) * self.tw + ix,
+            (iy + 1).min(self.th - 1) * self.tw + ix,
+        ]
+    }
+
+    /// Relief of texel `i`.
+    pub fn relief_of(&self, i: usize) -> f32 {
+        self.rel[i]
+    }
+
+    /// Height of texel `i`.
+    pub fn height_of(&self, i: usize) -> f32 {
+        self.surface((i % self.tw) as f32 * self.cx + 0.5 * self.cx) + self.rel[i]
+    }
+
+    /// Whether texel `i` was under the channel at the last `update`.
+    pub fn under_channel(&self, i: usize) -> bool {
+        self.near.get(i) == Some(&2)
+    }
+
+    /// Whether texel `i` was within `NEAR` widths of the channel.
+    pub fn near_channel(&self, i: usize) -> bool {
+        self.near.get(i).is_some_and(|&n| n > 0)
+    }
+
+    /// Mark exactly the texels `region` as backwater.
+    pub fn set_backwater(&mut self, region: impl Iterator<Item = usize>) {
+        self.backwater.fill(false);
+        region.for_each(|i| self.backwater[i] = true);
+    }
+
+    /// Leave clay in texel `i`.
+    pub fn harden(&mut self, i: usize) {
+        self.hardness[i] = 1.0;
+    }
+
+    /// Clay at a point in cells (bilinear).
+    pub fn hardness_at(&self, x: f32, y: f32) -> f32 {
+        let (fx, fy) = (x / self.cx - 0.5, (y / self.cy - 0.5).clamp(0.0, (self.th - 1) as f32));
+        let (x0, y0) = (fx.floor(), fy.floor());
+        let (tx, ty) = (fx - x0, fy - y0);
+        let (x0, y0) = (x0 as i64, y0 as usize);
+        let y1 = (y0 + 1).min(self.th - 1);
+        let at = |x: i64, y: usize| self.hardness[y * self.tw + x.rem_euclid(self.tw as i64) as usize];
+        let bottom = at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx;
+        let top = at(x0, y1) * (1.0 - tx) + at(x0 + 1, y1) * tx;
+        bottom * (1.0 - ty) + top * ty
+    }
+
     /// Lower the bed under a channel `width` wide along `pts` (parabolic
     /// across, `DEPTH` × width at the middle), where it's higher.
     pub fn carve(&mut self, pts: &[[f32; 2]], width: f32) {
@@ -227,6 +316,8 @@ impl Terrain {
         self.mark(nodes, width);
         self.settle(width, dt as f32);
         self.carve(nodes, width);
+        let keep = (-dt / CLAY_LIFE).exp() as f32;
+        self.hardness.iter_mut().for_each(|h| *h *= keep);
     }
 
     /// Fill `near`: 2 under the channel, 1 close to it.
@@ -265,7 +356,7 @@ impl Terrain {
             let (ix, iy) = (i % self.tw, i / self.tw);
             // Slightly uneven filling, so shapes aren't uniform.
             let (x, y) = ((ix as f32 + 0.5) * self.cx, (iy as f32 + 0.5) * self.cy);
-            let rate = if self.near[i] == 1 { NEAR_FILL } else { SILT_FILL } * width * (0.4 + 1.2 * noise.fbm(x, y, 2.0 * width, 1, self.gw));
+            let rate = if self.near[i] == 1 && !self.backwater[i] { NEAR_FILL } else { SILT_FILL } * width * (0.4 + 1.2 * noise.fbm(x, y, 2.0 * width, 1, self.gw));
             let at = |dx: i64, dy: i64| {
                 let (jx, jy) = ((ix as i64 + dx).rem_euclid(self.tw as i64) as usize, (iy as i64 + dy).clamp(0, self.th as i64 - 1) as usize);
                 self.rel[jy * self.tw + jx]
@@ -285,33 +376,55 @@ impl Terrain {
 
     pub fn save(&self) -> Saved {
         let min = (self.rel.iter().fold(f32::INFINITY, |m, &h| m.min(h)) * QUANT).floor() / QUANT;
-        let mut prev = 0u16;
-        let mut bytes = Vec::with_capacity(self.rel.len() * 2);
-        for &h in &self.rel {
-            let q = ((h - min) * QUANT).round().clamp(0.0, 65535.0) as u16;
-            // Differences along the row compress far better than heights.
-            bytes.extend_from_slice(&q.wrapping_sub(prev).to_le_bytes());
-            prev = q;
-        }
-        let deflated = miniz_oxide::deflate::compress_to_vec(&bytes, 6);
-        Saved { seed: self.seed, width: self.width, min, heights: base64(&deflated) }
+        let heights = pack(self.rel.iter().map(|&h| ((h - min) * QUANT).round().clamp(0.0, 65535.0) as u16));
+        let hardness = pack(self.hardness.iter().map(|&h| (h * 255.0).round() as u16));
+        Saved { seed: self.seed, width: self.width, min, heights, hardness }
     }
 
     /// Restore a saved terrain for a `gw`×`gh` grid.
     pub fn restore(s: &Saved, gw: u32, gh: u32) -> Option<Self> {
         let mut t = Self::blank(gw, gh, s.width, s.seed);
-        let bytes = miniz_oxide::inflate::decompress_to_vec_with_limit(&unbase64(&s.heights)?, t.rel.len() * 2).ok()?;
-        if bytes.len() != t.rel.len() * 2 {
-            return None;
+        for (h, q) in t.rel.iter_mut().zip(unpack(&s.heights, t.tw * t.th)?) {
+            *h = s.min + q as f32 / QUANT;
         }
-        let mut prev = 0u16;
-        for (h, b) in t.rel.iter_mut().zip(bytes.chunks_exact(2)) {
-            prev = prev.wrapping_add(u16::from_le_bytes([b[0], b[1]]));
-            *h = s.min + prev as f32 / QUANT;
+        if !s.hardness.is_empty() {
+            for (h, q) in t.hardness.iter_mut().zip(unpack(&s.hardness, t.tw * t.th)?) {
+                *h = (q as f32 / 255.0).min(1.0);
+            }
         }
         t.pits = (0..t.rel.len() as u32).filter(|&i| t.rel[i as usize] < -EPS).collect();
         Some(t)
     }
+}
+
+/// Values as differences along the row (they compress far better than the
+/// values), deflated, in base64.
+fn pack(values: impl Iterator<Item = u16>) -> String {
+    let mut prev = 0u16;
+    let mut bytes = Vec::new();
+    for q in values {
+        bytes.extend_from_slice(&q.wrapping_sub(prev).to_le_bytes());
+        prev = q;
+    }
+    base64(&miniz_oxide::deflate::compress_to_vec(&bytes, 6))
+}
+
+/// The `n` values `pack` made, if that's what `s` holds.
+fn unpack(s: &str, n: usize) -> Option<Vec<u16>> {
+    let bytes = miniz_oxide::inflate::decompress_to_vec_with_limit(&unbase64(s)?, n * 2).ok()?;
+    if bytes.len() != n * 2 {
+        return None;
+    }
+    let mut prev = 0u16;
+    Some(
+        bytes
+            .chunks_exact(2)
+            .map(|b| {
+                prev = prev.wrapping_add(u16::from_le_bytes([b[0], b[1]]));
+                prev
+            })
+            .collect(),
+    )
 }
 
 /// Height of the valley wall `t` cells past the floor's edge: curving up

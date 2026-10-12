@@ -9,6 +9,7 @@ mod bench;
 mod critical;
 mod engine;
 mod input;
+mod lake;
 mod lightning;
 mod params;
 mod render;

@@ -6,9 +6,11 @@
 //! bend in) plus a weighted average of the curvature just upstream (pushing
 //! it out, and downstream). Bends grow and drift. When two stretches of the
 //! channel come within about a width of each other, the loop between them is
-//! cut off and left behind as an oxbow lake, which silts up and greens over.
-//! The river runs along a valley in an unrendered height map (`terrain`),
-//! which holds the meander belt in and records where the channel has been.
+//! cut off and left behind as an oxbow lake: water standing in the trench in
+//! the height map, which evaporates, silts up, rounds out and dries to sand
+//! and then green. The river runs along a valley in an unrendered height map
+//! (`terrain`), which holds the meander belt in and records where the channel
+//! has been; `lake` holds the water in its hollows.
 //!
 //! The river reaches the GPU as a field texture (`raster`), a little finer
 //! than the cell grid, read by both the step rule and the renderers:
@@ -22,6 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::lake::{self, Lake, Lakes};
 use crate::rng::Rng;
 use crate::shaders::state::{TREE, WATER};
 use crate::terrain::{self, Terrain};
@@ -42,8 +45,8 @@ const SPACING: f32 = 0.3;
 const CUTOFF: f32 = 1.1;
 /// ...if the loop is at least this long, in widths.
 const LOOP: f32 = 3.5;
-/// River clock steps (steps × meander rate) for an oxbow lake to silt up,
-/// and for fresh sand to green over.
+/// River clock steps (steps × meander rate) for a trench to silt up, which
+/// sets the pace of the lakes, and for fresh sand to green over.
 pub const LAKE_LIFE: f64 = 15000.0;
 const DEPOSIT_LIFE: f64 = 900.0;
 /// The field texture is capped at this many texels; a full one is about 12 MB.
@@ -76,14 +79,14 @@ const CHUTE_ACROSS: f32 = 3.0;
 const CHUTE_RATE: f64 = 2e-5;
 /// Chutes are looked for this often, in river-clock steps.
 const CHUTE_EVERY: f64 = 400.0;
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Lake {
-    pts: Vec<[f32; 2]>,
-    /// Half-width when it was cut off.
-    hw: f32,
-    born: f64,
-}
+/// Clay slows a bank to 1 / (1 + this × hardness) of its rate.
+const PLUG: f32 = 4.0;
+/// Floods come at random, this many river-clock steps apart on average, and
+/// last about `FLOOD_LEN` steps, over which the river's half-width swells
+/// by `FLOOD_RISE` and falls back.
+const FLOOD_EVERY: f64 = 4000.0;
+const FLOOD_LEN: f64 = 400.0;
+const FLOOD_RISE: f32 = 0.4;
 
 /// What's saved between runs.
 #[derive(Serialize, Deserialize)]
@@ -103,7 +106,7 @@ pub struct River {
     /// Channel width in cells.
     width: f32,
     nodes: Vec<[f32; 2]>,
-    lakes: Vec<Lake>,
+    lakes: Lakes,
     /// Steps × meander rate.
     clock: f64,
     terrain: Terrain,
@@ -111,8 +114,13 @@ pub struct River {
     /// looked for.
     ground_clock: f64,
     chute_clock: f64,
-    /// For chute cutoffs; not saved.
+    /// For chute cutoffs and floods; not saved.
     rng: Rng,
+    /// When the next (or current) flood starts and how long it lasts, and the
+    /// flood stage as last drawn.
+    flood_at: f64,
+    flood_len: f64,
+    drawn_stage: f32,
     /// Field size in texels, and texels per cell on each axis.
     pub fw: u32,
     pub fh: u32,
@@ -142,7 +150,7 @@ fn default_scale(gw: u32, gh: u32) -> f32 {
     (640.0 / gw.max(gh) as f32).clamp(1.0, 16.0).min((MAX_TEXELS / (gw * gh) as f32).sqrt())
 }
 
-fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+pub fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -193,10 +201,13 @@ impl River {
                 break;
             }
         }
-        // And a little more, drawing as it goes, to lay down point bars.
-        for _ in 0..6 {
+        // And a little more, drawing as it goes, to lay down point bars and
+        // let the latest oxbows (only) settle in.
+        r.lakes.clear();
+        r.ground_clock = r.clock;
+        for _ in 0..8 {
+            r.advance(400.0, 1.0);
             r.raster();
-            r.advance(150.0, 1.0);
         }
         r
     }
@@ -214,12 +225,15 @@ impl River {
             gh,
             width: Self::fit_width(width, gh),
             nodes: Vec::new(),
-            lakes: Vec::new(),
+            lakes: Lakes::default(),
             clock: 0.0,
             terrain,
             ground_clock: 0.0,
             chute_clock: 0.0,
             rng: Rng::from_clock(),
+            flood_at: 0.0,
+            flood_len: FLOOD_LEN,
+            drawn_stage: 0.0,
             fw: 0,
             fh: 0,
             sx: 1.0,
@@ -236,6 +250,7 @@ impl River {
             cover_block: 1.0,
         };
         r.alloc(scale);
+        r.schedule_flood();
         r
     }
 
@@ -247,7 +262,9 @@ impl River {
         }
         let terrain = Terrain::restore(&s.terrain, gw, gh)?;
         let mut r = River::blank(gw, gh, s.width, default_scale(gw, gh), terrain);
-        (r.width, r.nodes, r.lakes, r.clock) = (s.width, s.nodes, s.lakes, s.clock);
+        (r.width, r.nodes, r.lakes, r.clock) = (s.width, s.nodes, Lakes::from_saved(s.lakes), s.clock);
+        (r.ground_clock, r.chute_clock) = (r.clock, r.clock);
+        r.schedule_flood();
         r.force(&mut Rng::from_clock());
         Some(r)
     }
@@ -258,7 +275,7 @@ impl River {
             gh: self.gh,
             width: self.width,
             nodes: self.nodes.clone(),
-            lakes: self.lakes.clone(),
+            lakes: self.lakes.saved(),
             clock: self.clock,
             terrain: self.terrain.save(),
         };
@@ -292,9 +309,11 @@ impl River {
             return;
         }
         let (kx, ky) = (gw as f32 / self.gw as f32, gh as f32 / self.gh as f32);
-        for p in self.nodes.iter_mut().chain(self.lakes.iter_mut().flat_map(|l| l.pts.iter_mut())) {
+        for p in &mut self.nodes {
             *p = [p[0] * kx, p[1] * ky];
         }
+        // The new ground has no hollows for the water to stand in.
+        self.lakes.clear();
         (self.gw, self.gh) = (gw, gh);
         self.cover.clear();
         self.width = Self::fit_width(self.width, gh);
@@ -308,6 +327,7 @@ impl River {
         if (w - self.width).abs() > 1e-3 {
             self.width = w;
             self.terrain = self.terrain.resized(self.gw, self.gh, w);
+            self.lakes.clear();
             self.resample();
             self.cut = true;
         }
@@ -316,7 +336,20 @@ impl River {
     /// Whether the river has changed enough since the last `raster` to
     /// be worth uploading again.
     pub fn changed(&self) -> bool {
-        self.cut || self.moved > 0.1
+        let swell = (self.flood_stage() - self.drawn_stage).abs() * 0.5 * self.width * FLOOD_RISE;
+        self.cut || self.moved > 0.1 || swell > 0.1 || self.lakes.changed()
+    }
+
+    /// How high the river is in the current flood: 0 (none) to 1.
+    fn flood_stage(&self) -> f32 {
+        let t = (self.clock - self.flood_at) / self.flood_len;
+        if t <= 0.0 || t >= 1.0 { 0.0 } else { (std::f64::consts::PI * t).sin().powi(2) as f32 }
+    }
+
+    /// Pick the next flood: an exponential wait from now.
+    fn schedule_flood(&mut self) {
+        self.flood_at = self.clock - FLOOD_EVERY * (1.0 - self.rng.f64()).ln();
+        self.flood_len = FLOOD_LEN * (0.6 + 0.8 * self.rng.f64());
     }
 
     /// Nodes this close to the grid's left and right edges hardly move, so
@@ -374,7 +407,9 @@ impl River {
             self.chute(self.clock - self.chute_clock);
             self.chute_clock = self.clock;
         }
-        self.lakes.retain(|l| self.clock - l.born < LAKE_LIFE);
+        if self.clock > self.flood_at + self.flood_len {
+            self.schedule_flood();
+        }
     }
 
     /// Migration rate of each node, in cells per river-clock step, to its
@@ -417,7 +452,8 @@ impl River {
                 let v = v[i] - DRIFT * KL * slope * self.mobility(self.nodes[i][0]);
                 let q = self.bank(i, v);
                 let up = self.high(q) / (UPHILL * w);
-                v / (1.0 + up * up).powi(2)
+                // And old lake beds, hardened to clay, resist.
+                v / (1.0 + up * up).powi(2) / (1.0 + PLUG * self.terrain.hardness_at(q[0], q[1]))
             })
             .collect();
         if self.cover.is_empty() {
@@ -560,7 +596,7 @@ impl River {
         if pts.len() > 4 {
             let pts: Vec<[f32; 2]> = pts.into();
             self.terrain.carve(&pts, self.width);
-            self.lakes.push(Lake { pts, hw: self.width * 0.5, born: self.clock });
+            self.lakes.add(&self.terrain, &pts);
         }
         self.resample();
         self.cut = true;
@@ -636,22 +672,18 @@ impl River {
         let dt = self.clock - self.ground_clock;
         self.ground_clock = self.clock;
         self.terrain.update(&self.nodes, self.width, dt);
+        let stage = self.flood_stage();
+        self.drawn_stage = stage;
+        self.lakes.update(&mut self.terrain, self.width, dt as f32, stage);
         let far = self.reach();
         self.dist.fill(far);
         self.flow.fill([0.0; 2]);
-        let hw = self.width * 0.5;
+        let hw = self.width * 0.5 * (1.0 + FLOOD_RISE * stage);
         let nodes = std::mem::take(&mut self.nodes);
         self.stamp(&nodes, hw, 1.0);
         self.nodes = nodes;
-        let lakes = std::mem::take(&mut self.lakes);
-        for l in &lakes {
-            let age = ((self.clock - l.born) / LAKE_LIFE).clamp(0.0, 1.0) as f32;
-            let hw = l.hw * (1.0 - age).sqrt();
-            if hw > 0.25 {
-                self.stamp(&l.pts, hw, 0.25 * (1.0 - age));
-            }
-        }
-        self.lakes = lakes;
+        let mut field = lake::Field { w: self.fw, h: self.fh, sx: self.sx, sy: self.sy, dist: &mut self.dist, flow: &mut self.flow };
+        self.lakes.stamp(&self.terrain, &mut field, self.width, far);
         let mut out = Vec::with_capacity(self.dist.len() * 4);
         let far16 = f16(far);
         for i in 0..self.dist.len() {
@@ -817,7 +849,8 @@ mod tests {
         assert_eq!(s.nodes, r.nodes);
         assert!(River::restore(&r.save(), 121, 80).is_none());
         // Ground and all.
-        assert_eq!(s.terrain.pits().count(), r.terrain.pits().count());
+        // (Quantizing can tip a texel at the pit threshold either way.)
+        assert!(s.terrain.pits().count().abs_diff(r.terrain.pits().count()) <= 5);
         assert!((s.terrain.relief_at(50.0, 20.0) - r.terrain.relief_at(50.0, 20.0)).abs() < 0.01);
         // An old save, from before there was terrain, is dropped.
         let mut old: serde_json::Value = serde_json::from_slice(&r.save()).unwrap();
@@ -899,5 +932,134 @@ mod tests {
         r.chute(1e6);
         assert_eq!(r.lakes.len(), lakes + 1);
         assert!(r.sinuosity() < before - 0.3, "{before} -> {}", r.sinuosity());
+    }
+
+    #[test]
+    fn a_cutoff_leaves_a_lake_that_dries() {
+        let mut r = River::with_scale(400, 200, 6.0, 3, 1.0);
+        r.lakes.clear();
+        let (i, j) = (r.nodes.len() / 3, r.nodes.len() / 3 + 40);
+        let loop_pts: Vec<[f32; 2]> = r.nodes[i + 6..j - 6].to_vec();
+        r.cut_loop(i, j);
+        r.raster();
+        assert_eq!(r.lakes.len(), 1);
+        // Water lies along the abandoned loop (away from the new channel).
+        let wet = loop_pts.iter().filter(|p| r.water(p[0] as u32, p[1] as u32)).count();
+        assert!(wet * 2 > loop_pts.len(), "{wet} of {}", loop_pts.len());
+        assert!(r.changed());
+        let mut steps = 0.0;
+        while r.lakes.len() > 0 && steps < 3.0 * LAKE_LIFE {
+            r.advance(15.0, 0.0);
+            r.clock += 15.0;
+            r.raster();
+            steps += 15.0;
+        }
+        assert!(r.lakes.len() == 0 && steps > 0.2 * LAKE_LIFE, "{steps}");
+        // It left clay where it stood.
+        assert!(loop_pts.iter().any(|p| r.terrain.hardness_at(p[0], p[1]) > 0.3));
+    }
+
+    #[test]
+    fn clay_slows_migration() {
+        let mut r = River::with_scale(300, 200, 5.0, 8, 1.0);
+        let base = r.velocities();
+        let i = r.nodes.len() / 2;
+        let q = r.bank(i, base[i]);
+        // A plug on the bank this node cuts into.
+        for dx in -3..=3 {
+            for dy in -3..=3 {
+                let k = r.terrain.index_at(q[0] + dx as f32 * 2.0, q[1] + dy as f32 * 2.0);
+                r.terrain.harden(k);
+            }
+        }
+        let slow = r.velocities();
+        assert!(slow[i].abs() < base[i].abs() / (1.0 + 0.8 * PLUG), "{} vs {}", slow[i], base[i]);
+    }
+
+    #[test]
+    fn saves_lakes_and_clay() {
+        let mut r = River::with_scale(200, 120, 5.0, 4, 1.0);
+        r.lakes.clear();
+        let i = r.nodes.len() / 3;
+        let (a, b) = (r.nodes[i + 6], r.nodes[i + 30]);
+        r.cut_loop(i, i + 40);
+        r.raster();
+        r.terrain.harden(r.terrain.index_at(a[0], a[1]));
+        let s = River::restore(&r.save(), 200, 120).unwrap();
+        assert_eq!(s.lakes.len(), r.lakes.len());
+        assert!(s.terrain.hardness_at(a[0], a[1]) > 0.1 && s.terrain.hardness_at(b[0] + 60.0, b[1] + 60.0) == 0.0);
+        // Restored (with a finer field), it draws about the same water.
+        let mut s = s;
+        r.flood_at = r.clock + 1e9;
+        let (wr, ws) = (r.raster(), s.raster());
+        let water = |v: &[u16], sc: f32| v.chunks(4).filter(|p| p[0] & 0x8000 != 0).count() as f32 / (sc * sc);
+        let (a, b) = (water(&wr, r.sx), water(&ws, s.sx));
+        assert!((a - b).abs() < 0.05 * a, "{a} vs {b}");
+    }
+
+    #[test]
+    fn floods_swell_the_river_and_recede() {
+        let mut r = River::with_scale(300, 200, 6.0, 9, 1.0);
+        let count = |r: &River| (0..300).flat_map(|x| (0..200).map(move |y| (x, y))).filter(|&(x, y)| r.water(x, y)).count();
+        r.flood_at = r.clock + 1e9;
+        r.raster();
+        let normal = count(&r);
+        (r.flood_at, r.flood_len) = (r.clock - 200.0, 400.0);
+        assert!(r.changed());
+        r.raster();
+        let high = count(&r);
+        assert!(high as f32 > 1.2 * normal as f32 && (high as f32) < 1.6 * normal as f32, "{normal} -> {high}");
+        // Once over, a new one is scheduled and the water falls back.
+        r.advance(400.0, 1.0);
+        r.raster();
+        assert!(r.flood_at > r.clock - 1.0);
+        assert!(count(&r) < high);
+    }
+
+    /// Dumps PNGs of the field as it evolves: `TB_DUMP=/dir TB_SEED=n cargo test --release dump -- --ignored`.
+    #[test]
+    #[ignore]
+    fn dump_frames() {
+        let dir = std::env::var("TB_DUMP").unwrap();
+        let seed: u64 = std::env::var("TB_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let width: f32 = std::env::var("TB_W").ok().and_then(|s| s.parse().ok()).unwrap_or(6.7);
+        let every: usize = std::env::var("TB_EVERY").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+        let total: usize = std::env::var("TB_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(120000);
+        let mut r = River::with_scale(640, 360, width, seed, 1.0);
+        let mut t = 0;
+        while t <= total {
+            // 15 steps between rasters, as at 60 steps/s.
+            for _ in 0..every / 15 {
+                r.advance(15.0, 1.0);
+                r.raster();
+            }
+            t += every;
+            let (w, h) = (r.fw as usize, r.fh as usize);
+            let mut img = vec![255u8; w * h * 4];
+            for y in 0..h {
+                for x in 0..w {
+                    let i = y * w + x;
+                    let (d, f) = (r.dist[i], r.flow[i][0].hypot(r.flow[i][1]));
+                    let sand = (1.0 - (r.clock - r.dried[i]) / DEPOSIT_LIFE).clamp(0.0, 1.0) as f32;
+                    let clay = r.terrain.hardness_at((x as f32 + 0.5) / r.sx, (y as f32 + 0.5) / r.sy);
+                    let mut c = [40.0 + 40.0 * clay, 90.0 - 30.0 * clay, 40.0];
+                    if sand > 0.0 && d >= 0.0 {
+                        c = [c[0] + (210.0 - c[0]) * sand, c[1] + (190.0 - c[1]) * sand, c[2] + (120.0 - c[2]) * sand];
+                    }
+                    if d < 0.0 {
+                        let k = (f / 0.25).min(1.0);
+                        c = if f >= 0.99 { [40.0, 90.0, 220.0] } else { [60.0 - 30.0 * (1.0 - k), 90.0 + 70.0 * k, 90.0 + 130.0 * k] };
+                    }
+                    let o = ((h - 1 - y) * w + x) * 4;
+                    img[o..o + 3].iter_mut().zip(c).for_each(|(p, c)| *p = c as u8);
+                }
+            }
+            let file = std::fs::File::create(format!("{dir}/f{t:06}.png")).unwrap();
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(&img).unwrap();
+            eprintln!("t={t} lakes={}", r.lakes.len());
+        }
     }
 }
