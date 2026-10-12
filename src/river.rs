@@ -7,6 +7,8 @@
 //! it out, and downstream). Bends grow and drift. When two stretches of the
 //! channel come within about a width of each other, the loop between them is
 //! cut off and left behind as an oxbow lake, which silts up and greens over.
+//! The river runs along a valley in an unrendered height map (`terrain`),
+//! which holds the meander belt in and records where the channel has been.
 //!
 //! The river reaches the GPU as a field texture (`raster`), a little finer
 //! than the cell grid, read by both the step rule and the renderers:
@@ -22,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::rng::Rng;
 use crate::shaders::state::{TREE, WATER};
+use crate::terrain::{self, Terrain};
 
 /// Ω and Γ in the migration rate: the local curvature's weight (negative:
 /// it straightens) and the upstream curvature's (it bends further).
@@ -41,7 +44,7 @@ const CUTOFF: f32 = 1.1;
 const LOOP: f32 = 3.5;
 /// River clock steps (steps × meander rate) for an oxbow lake to silt up,
 /// and for fresh sand to green over.
-const LAKE_LIFE: f64 = 15000.0;
+pub const LAKE_LIFE: f64 = 15000.0;
 const DEPOSIT_LIFE: f64 = 900.0;
 /// The field texture is capped at this many texels; a full one is about 12 MB.
 const MAX_TEXELS: f32 = 1.5e6;
@@ -56,6 +59,23 @@ pub const RIPARIAN: f32 = 1.0;
 /// Half cover is the usual rate.
 const BARE: f32 = 1.6;
 const WOODED: f32 = 0.4;
+/// Ground higher than the valley floor slows a bank's migration: by half
+/// where it stands this many widths above the floor.
+const UPHILL: f32 = 0.1;
+/// A bank on a slope slides down it at this × KL × the slope, which brings
+/// a river that has strayed up a valley wall back toward the floor.
+const DRIFT: f32 = 1.0;
+/// A chute cutoff joins two stretches of channel at least this many widths
+/// apart along it and less than `CHUTE_ACROSS` widths apart across...
+const CHUTE_ALONG: f32 = 10.0;
+const CHUTE_ACROSS: f32 = 3.0;
+/// ...with probability per river-clock step of this × (along ÷ across) ×
+/// how low the ground between them lies, for the likeliest such pair. A
+/// long straight limb 3 widths from its neighbor goes in a few thousand
+/// steps; an ordinary loop, whose neck closes by itself first, rarely does.
+const CHUTE_RATE: f64 = 2e-5;
+/// Chutes are looked for this often, in river-clock steps.
+const CHUTE_EVERY: f64 = 400.0;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Lake {
@@ -74,6 +94,7 @@ struct Saved {
     nodes: Vec<[f32; 2]>,
     lakes: Vec<Lake>,
     clock: f64,
+    terrain: terrain::Saved,
 }
 
 pub struct River {
@@ -85,6 +106,13 @@ pub struct River {
     lakes: Vec<Lake>,
     /// Steps × meander rate.
     clock: f64,
+    terrain: Terrain,
+    /// The clock when the ground was last worked, and when chutes were last
+    /// looked for.
+    ground_clock: f64,
+    chute_clock: f64,
+    /// For chute cutoffs; not saved.
+    rng: Rng,
     /// Field size in texels, and texels per cell on each axis.
     pub fw: u32,
     pub fh: u32,
@@ -135,12 +163,13 @@ impl River {
     /// With `scale` field texels per cell.
     pub fn with_scale(gw: u32, gh: u32, width: f32, seed: u64, scale: f32) -> Self {
         let mut rng = Rng::new(seed);
-        let mut r = Self::blank(gw, gh, width, scale);
+        let width = Self::fit_width(width, gh);
+        let mut r = Self::blank(gw, gh, width, scale, Terrain::new(gw, gh, width, rng.next_u64()));
+        r.rng = Rng::new(rng.next_u64());
         r.force(&mut rng);
-        let width = r.width;
-        // A gently wavy line; the wiggles that suit the migration grow.
+        // A gently wavy line along the valley; the wiggles that suit the
+        // migration grow.
         let (x0, x1) = (-4.0 * width, gw as f32 + 4.0 * width);
-        let y0 = gh as f32 * (0.35 + 0.3 * rng.f32());
         let waves: Vec<(f32, f32, f32)> = (0..4)
             .map(|_| {
                 let amp = width * (0.2 + 0.4 * rng.f32());
@@ -153,7 +182,7 @@ impl River {
         r.nodes = (0..n)
             .map(|i| {
                 let x = x0 + (x1 - x0) * i as f32 / (n - 1) as f32;
-                let y = y0 + r.mobility(x) * waves.iter().map(|(a, k, p)| a * (k * x + p).sin()).sum::<f32>();
+                let y = r.terrain.valley_y(x) + r.mobility(x) * waves.iter().map(|(a, k, p)| a * (k * x + p).sin()).sum::<f32>();
                 [x, y]
             })
             .collect();
@@ -179,7 +208,7 @@ impl River {
             .collect();
     }
 
-    fn blank(gw: u32, gh: u32, width: f32, scale: f32) -> Self {
+    fn blank(gw: u32, gh: u32, width: f32, scale: f32, terrain: Terrain) -> Self {
         let mut r = River {
             gw,
             gh,
@@ -187,6 +216,10 @@ impl River {
             nodes: Vec::new(),
             lakes: Vec::new(),
             clock: 0.0,
+            terrain,
+            ground_clock: 0.0,
+            chute_clock: 0.0,
+            rng: Rng::from_clock(),
             fw: 0,
             fh: 0,
             sx: 1.0,
@@ -212,7 +245,8 @@ impl River {
         if (s.gw, s.gh) != (gw, gh) || s.nodes.len() < 4 {
             return None;
         }
-        let mut r = River::blank(gw, gh, s.width, default_scale(gw, gh));
+        let terrain = Terrain::restore(&s.terrain, gw, gh)?;
+        let mut r = River::blank(gw, gh, s.width, default_scale(gw, gh), terrain);
         (r.width, r.nodes, r.lakes, r.clock) = (s.width, s.nodes, s.lakes, s.clock);
         r.force(&mut Rng::from_clock());
         Some(r)
@@ -226,6 +260,7 @@ impl River {
             nodes: self.nodes.clone(),
             lakes: self.lakes.clone(),
             clock: self.clock,
+            terrain: self.terrain.save(),
         };
         serde_json::to_vec(&s).unwrap_or_default()
     }
@@ -264,6 +299,7 @@ impl River {
         self.cover.clear();
         self.width = Self::fit_width(self.width, gh);
         self.alloc(default_scale(gw, gh));
+        self.terrain = self.terrain.resized(gw, gh, self.width);
         self.resample();
     }
 
@@ -271,6 +307,7 @@ impl River {
         let w = Self::fit_width(width, self.gh);
         if (w - self.width).abs() > 1e-3 {
             self.width = w;
+            self.terrain = self.terrain.resized(self.gw, self.gh, w);
             self.resample();
             self.cut = true;
         }
@@ -333,6 +370,10 @@ impl River {
             left -= dt;
         }
         self.cutoffs();
+        if self.clock - self.chute_clock >= CHUTE_EVERY {
+            self.chute(self.clock - self.chute_clock);
+            self.chute_clock = self.clock;
+        }
         self.lakes.retain(|l| self.clock - l.born < LAKE_LIFE);
     }
 
@@ -367,6 +408,18 @@ impl River {
                 KL * (r1 + FORCING * f) * self.mobility(x)
             })
             .collect();
+        // Banks that climb out of the valley floor hold the river in, and
+        // wash it back down the slope.
+        let v: Vec<f32> = (0..n)
+            .map(|i| {
+                let (right, left) = (self.bank(i, 1.0), self.bank(i, -1.0));
+                let slope = (self.high(right) - self.high(left)) / (2.0 * w);
+                let v = v[i] - DRIFT * KL * slope * self.mobility(self.nodes[i][0]);
+                let q = self.bank(i, v);
+                let up = self.high(q) / (UPHILL * w);
+                v / (1.0 + up * up).powi(2)
+            })
+            .collect();
         if self.cover.is_empty() {
             return v;
         }
@@ -374,18 +427,29 @@ impl River {
         // smoothed along the channel so it doesn't start node-scale wiggles.
         let m: Vec<f32> = (0..n)
             .map(|i| {
-                let (a, b) = (self.nodes[i.saturating_sub(1)], self.nodes[(i + 1).min(n - 1)]);
-                let (tx, ty) = (b[0] - a[0], b[1] - a[1]);
-                let l = (tx * tx + ty * ty).sqrt().max(1e-6);
-                // Halfway across the strip of bank the node is moving into.
-                let o = v[i].signum() * w;
-                let p = self.nodes[i];
-                let c = self.cover_at(p[0] + o * ty / l, p[1] - o * tx / l);
+                let q = self.bank(i, v[i]);
+                let c = self.cover_at(q[0], q[1]);
                 WOODED + (BARE - WOODED) * (1.0 - c)
             })
             .collect();
         let m: Vec<f32> = (0..n).map(|i| 0.25 * m[i.saturating_sub(1)] + 0.5 * m[i] + 0.25 * m[(i + 1).min(n - 1)]).collect();
         v.iter().zip(m).map(|(v, m)| v * m).collect()
+    }
+
+    /// How far above the valley floor the ground is at `q`, if it is.
+    fn high(&self, q: [f32; 2]) -> f32 {
+        self.terrain.relief_at(q[0], q[1]).max(0.0)
+    }
+
+    /// The point one width out from node `i` on the side `v` (a migration
+    /// rate) moves it toward.
+    fn bank(&self, i: usize, v: f32) -> [f32; 2] {
+        let (a, b) = (self.nodes[i.saturating_sub(1)], self.nodes[(i + 1).min(self.nodes.len() - 1)]);
+        let (tx, ty) = (b[0] - a[0], b[1] - a[1]);
+        let l = (tx * tx + ty * ty).sqrt().max(1e-6);
+        let o = v.signum() * self.width;
+        let p = self.nodes[i];
+        [p[0] + o * ty / l, p[1] - o * tx / l]
     }
 
     /// Take tree cover from a copy of the grid (`width`×`height` RGBA cells,
@@ -456,7 +520,6 @@ impl River {
     fn cutoffs(&mut self) {
         let cr = CUTOFF * self.width;
         let gap = (LOOP / SPACING).ceil() as usize;
-        let trim = (1.0 / SPACING).ceil() as usize;
         loop {
             let mut bins: std::collections::HashMap<(i32, i32), Vec<usize>> = Default::default();
             for (i, p) in self.nodes.iter().enumerate() {
@@ -477,21 +540,88 @@ impl River {
                 }
             }
             let Some((i, j)) = found else { break };
-            let mut pts: std::collections::VecDeque<[f32; 2]> = self.nodes[i + trim..=j - trim].iter().copied().collect();
-            self.nodes.drain(i + 1..j);
-            // Trim the lake back from the new channel, so it lies apart.
-            let near = |q: [f32; 2], nodes: &[[f32; 2]]| nodes.iter().any(|&p| dist(p, q) < 1.5 * self.width);
-            while pts.front().is_some_and(|&q| near(q, &self.nodes)) {
-                pts.pop_front();
+            self.cut_loop(i, j);
+        }
+    }
+
+    /// Cut off the loop between nodes `i` and `j`, leaving a lake.
+    fn cut_loop(&mut self, i: usize, j: usize) {
+        let trim = (1.0 / SPACING).ceil() as usize;
+        let mut pts: std::collections::VecDeque<[f32; 2]> = self.nodes[i + trim..=j - trim].iter().copied().collect();
+        self.nodes.drain(i + 1..j);
+        // Trim the lake back from the new channel, so it lies apart.
+        let near = |q: [f32; 2], nodes: &[[f32; 2]]| nodes.iter().any(|&p| dist(p, q) < 1.5 * self.width);
+        while pts.front().is_some_and(|&q| near(q, &self.nodes)) {
+            pts.pop_front();
+        }
+        while pts.back().is_some_and(|&q| near(q, &self.nodes)) {
+            pts.pop_back();
+        }
+        if pts.len() > 4 {
+            let pts: Vec<[f32; 2]> = pts.into();
+            self.terrain.carve(&pts, self.width);
+            self.lakes.push(Lake { pts, hw: self.width * 0.5, born: self.clock });
+        }
+        self.resample();
+        self.cut = true;
+    }
+
+    /// Maybe cut a chute: join two stretches of channel that run side by
+    /// side, far apart along the river, which Howard–Knutson never would
+    /// (a straight limb doesn't move). `dt` river-clock steps have passed.
+    fn chute(&mut self, dt: f64) {
+        let w = self.width;
+        let across = CHUTE_ACROSS * w;
+        let gap = (CHUTE_ALONG / SPACING).ceil() as usize;
+        // Nodes in a grid of cells `across` wide, as linked lists.
+        let min = self.nodes.iter().fold([f32::INFINITY; 2], |m, p| [m[0].min(p[0]), m[1].min(p[1])]);
+        let at = |p: [f32; 2]| (((p[0] - min[0]) / across) as i32, ((p[1] - min[1]) / across) as i32);
+        let cols = self.nodes.iter().map(|&p| at(p).0).max().unwrap_or(0) + 1;
+        let rows = self.nodes.iter().map(|&p| at(p).1).max().unwrap_or(0) + 1;
+        let mut head = vec![usize::MAX; (cols * rows) as usize];
+        let mut next = vec![usize::MAX; self.nodes.len()];
+        for (i, &p) in self.nodes.iter().enumerate() {
+            let (cx, cy) = at(p);
+            next[i] = std::mem::replace(&mut head[(cy * cols + cx) as usize], i);
+        }
+        let mut best = (0.0f64, 0, 0);
+        for (i, &p) in self.nodes.iter().enumerate() {
+            let (cx, cy) = at(p);
+            // The likeliest partner for this node: along ÷ across is highest.
+            let mut mate = (0.0f32, 0);
+            for gy in (cy - 1).max(0)..=(cy + 1).min(rows - 1) {
+                for gx in (cx - 1).max(0)..=(cx + 1).min(cols - 1) {
+                    let mut j = head[(gy * cols + gx) as usize];
+                    while j != usize::MAX {
+                        let d = dist(p, self.nodes[j]);
+                        if j > i + gap && d < across {
+                            let ratio = (j - i) as f32 * SPACING * w / d.max(w);
+                            if ratio > mate.0 {
+                                mate = (ratio, j);
+                            }
+                        }
+                        j = next[j];
+                    }
+                }
             }
-            while pts.back().is_some_and(|&q| near(q, &self.nodes)) {
-                pts.pop_back();
+            if mate.0 > 0.0 {
+                let q = self.nodes[mate.1];
+                // Lower ground between them makes the cut likelier.
+                let high = (1..4)
+                    .map(|k| {
+                        let t = 0.25 * k as f32;
+                        self.high([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])])
+                    })
+                    .sum::<f32>()
+                    / (3.0 * UPHILL * w);
+                let score = (mate.0 / (1.0 + high * high)) as f64;
+                if score > best.0 {
+                    best = (score, i, mate.1);
+                }
             }
-            if pts.len() > 4 {
-                self.lakes.push(Lake { pts: pts.into(), hw: self.width * 0.5, born: self.clock });
-            }
-            self.resample();
-            self.cut = true;
+        }
+        if best.0 > 0.0 && self.rng.f64() < 1.0 - (-CHUTE_RATE * best.0 * dt).exp() {
+            self.cut_loop(best.1, best.2);
         }
     }
 
@@ -503,6 +633,9 @@ impl River {
     /// Draw the field (see the module doc), as RGBA f16 texels, rows from
     /// y = 0 (y up, like the grid).
     pub fn raster(&mut self) -> Vec<u16> {
+        let dt = self.clock - self.ground_clock;
+        self.ground_clock = self.clock;
+        self.terrain.update(&self.nodes, self.width, dt);
         let far = self.reach();
         self.dist.fill(far);
         self.flow.fill([0.0; 2]);
@@ -683,5 +816,88 @@ mod tests {
         let s = River::restore(&r.save(), 120, 80).unwrap();
         assert_eq!(s.nodes, r.nodes);
         assert!(River::restore(&r.save(), 121, 80).is_none());
+        // Ground and all.
+        assert_eq!(s.terrain.pits().count(), r.terrain.pits().count());
+        assert!((s.terrain.relief_at(50.0, 20.0) - r.terrain.relief_at(50.0, 20.0)).abs() < 0.01);
+        // An old save, from before there was terrain, is dropped.
+        let mut old: serde_json::Value = serde_json::from_slice(&r.save()).unwrap();
+        old.as_object_mut().unwrap().remove("terrain");
+        assert!(River::restore(&serde_json::to_vec(&old).unwrap(), 120, 80).is_none());
+    }
+
+    #[test]
+    fn saves_small_enough_for_local_storage() {
+        let mut r = River::with_scale(640, 360, 2.0, 5, 1.0);
+        for _ in 0..40 {
+            r.advance(300.0, 1.0);
+            r.raster();
+        }
+        let n = r.save().len();
+        assert!(n < 300_000, "{n} bytes");
+        eprintln!("save: {n} bytes");
+    }
+
+    #[test]
+    fn starts_in_the_valley() {
+        let r = River::with_scale(300, 300, 5.0, 8, 1.0);
+        for p in &r.nodes {
+            assert!((p[1] - r.terrain.valley_y(p[0])).abs() < r.terrain.valley_half(), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn stays_in_its_valley_on_a_tall_grid() {
+        let (gw, gh, w) = (400, 400, 6.0);
+        let mut r = River::with_scale(gw, gh, w, 4, 1.0);
+        let reach = r.terrain.valley_half() + 3.0 * w;
+        let (mut lo, mut hi) = (f32::INFINITY, 0.0f32);
+        for k in 0..300 {
+            r.advance(300.0, 1.0);
+            if k % 5 == 0 {
+                r.raster();
+            }
+            let sin = r.sinuosity();
+            (lo, hi) = (lo.min(sin), hi.max(sin));
+            for p in r.nodes.iter().filter(|p| p[0] > 3.0 * w && p[0] < gw as f32 - 3.0 * w) {
+                assert!((p[1] - r.terrain.valley_y(p[0])).abs() < reach, "step {k}: {p:?}");
+            }
+        }
+        // No comb of tall limbs, and it doesn't just lie straight either.
+        assert!(hi < 4.5 && hi > 1.5, "sinuosity {lo}..{hi}");
+        // The channel left a trench and its history in the ground.
+        assert!(r.terrain.pits().count() > 0);
+    }
+
+    #[test]
+    fn chutes_cut_a_comb() {
+        let w = 6.0;
+        let mut r = River::with_scale(400, 400, w, 6, 1.0);
+        // Limbs 2.5 widths apart, 15 long, joined at their ends.
+        let (y0, x0) = (r.terrain.valley_y(200.0) - 40.0, 80.0);
+        let mut pts = vec![[-4.0 * w, y0], [x0 - 20.0, y0]];
+        for k in 0..8 {
+            let x = x0 + 2.5 * w * k as f32;
+            let (a, b) = if k % 2 == 0 { (y0, y0 + 15.0 * w) } else { (y0 + 15.0 * w, y0) };
+            pts.extend([[x, a], [x, b]]);
+        }
+        pts.extend([[x0 + 2.5 * w * 8.0, y0], [404.0 + 4.0 * w, y0]]);
+        let mut nodes = vec![pts[0]];
+        for q in &pts[1..] {
+            let p = *nodes.last().unwrap();
+            let n = (dist(p, *q) / (0.3 * w)).ceil() as usize;
+            nodes.extend((1..=n).map(|i| [p[0] + (q[0] - p[0]) * i as f32 / n as f32, p[1] + (q[1] - p[1]) * i as f32 / n as f32]));
+        }
+        r.nodes = nodes;
+        r.resample();
+        let (before, lakes) = (r.sinuosity(), r.lakes.len());
+        // It can't fire at every step: a hundred steps' wait is rarely enough.
+        for _ in 0..100 {
+            r.chute(1.0);
+        }
+        assert_eq!(r.lakes.len(), lakes);
+        // But left alone long enough, a loop of the comb is cut off.
+        r.chute(1e6);
+        assert_eq!(r.lakes.len(), lakes + 1);
+        assert!(r.sinuosity() < before - 0.3, "{before} -> {}", r.sinuosity());
     }
 }

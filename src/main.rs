@@ -21,6 +21,7 @@ mod shaders;
 #[cfg(not(target_arch = "wasm32"))]
 mod shot;
 mod sim;
+mod terrain;
 mod ui;
 #[cfg(not(target_arch = "wasm32"))]
 mod update;
