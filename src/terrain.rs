@@ -44,7 +44,7 @@ pub const EPS: f32 = 0.02;
 /// `NEAR` widths of the channel (point bars), and elsewhere (silt). The slow
 /// rate empties a bed in about `LAKE_LIFE` steps.
 const NEAR_FILL: f32 = 1.0e-3;
-const SILT_FILL: f32 = DEPTH / crate::river::LAKE_LIFE as f32;
+const SILT_FILL: f32 = 0.35 * DEPTH / crate::river::LAKE_LIFE as f32;
 const NEAR: f32 = 2.0;
 /// Clock steps for a pit's edges to smooth by about a quarter toward their
 /// neighbors.
@@ -81,6 +81,9 @@ pub struct Terrain {
     /// Texels of a lake the channel is connected to: the channel doesn't
     /// silt them up fast, since it flows in rather than past.
     backwater: Vec<bool>,
+    /// Scratch for `slump`: membership of the band, and the change to apply.
+    banded: Vec<bool>,
+    delta: Vec<f32>,
 }
 
 /// What's saved: the texels are quantized, deflated, and in base64.
@@ -144,6 +147,8 @@ impl Terrain {
             near: Vec::new(),
             hardness: vec![0.0; tw * th],
             backwater: vec![false; tw * th],
+            banded: vec![false; tw * th],
+            delta: vec![0.0; tw * th],
         }
     }
 
@@ -265,6 +270,45 @@ impl Terrain {
     /// Leave clay in texel `i`.
     pub fn harden(&mut self, i: usize) {
         self.hardness[i] = 1.0;
+    }
+
+    /// Let the ground in `band` slump toward its neighbors in the band, by
+    /// `mix` (at most 0.25) of the height difference per texel pair. Mass is
+    /// kept: what a high texel loses its lower neighbor gains. Texels near
+    /// the channel stay as they are (it carves them again, which would
+    /// dig a standing hole in the banks), and a texel dropping below the surface
+    /// becomes a pit.
+    pub fn slump(&mut self, band: &[u32], mix: f32) {
+        for &i in band {
+            self.banded[i as usize] = !self.near_channel(i as usize);
+        }
+        let last = self.th - 1;
+        for &i in band {
+            let i = i as usize;
+            if !self.banded[i] {
+                continue;
+            }
+            let (ix, iy) = (i % self.tw, i / self.tw);
+            let right = iy * self.tw + (ix + 1) % self.tw;
+            let up = (iy + 1).min(last) * self.tw + ix;
+            for j in [right, up] {
+                if j != i && self.banded[j] {
+                    let flow = mix * (self.rel[j] - self.rel[i]);
+                    self.delta[i] += flow;
+                    self.delta[j] -= flow;
+                }
+            }
+        }
+        for &i in band {
+            let i = i as usize;
+            let h = self.rel[i] + self.delta[i];
+            if self.rel[i] >= -EPS && h < -EPS {
+                self.pits.push(i as u32);
+            }
+            self.rel[i] = h;
+            self.delta[i] = 0.0;
+            self.banded[i] = false;
+        }
     }
 
     /// Clay at a point in cells (bilinear).

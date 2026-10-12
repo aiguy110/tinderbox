@@ -1,12 +1,18 @@
 //! Lakes: water standing in hollows of the terrain.
 //!
-//! A lake is a water level and a few seeds. Its *region* is the set of
+//! A lake is a volume of water, its level, and a few seeds. Its *region* is the set of
 //! texels reachable from the seeds that lie below the level and below the
 //! surface (so a lake never spreads over the flat floor), excluding the
 //! channel's own bed, which is drawn as the channel. Each update:
 //!
-//! - the level drops by evaporation, or is held at the river's surface while
-//!   a lake touches the channel (a backwater), and is topped up in a flood;
+//! - the banks slump into the trench (see `Terrain::slump`): it widens and
+//!   shallows, and a narrow island between two arms is worn away;
+//! - the volume drops by evaporation (in proportion to the area), and the
+//!   level is solved from it, so the same water spreads over a wider bed
+//!   as the trench slumps, and gathers in the middle as the edges silt up.
+//!   A rising bed spills water rather than raising the level. The level is
+//!   held at the river's surface while a lake touches the channel (a
+//!   backwater), and is topped up in a flood;
 //! - the region is found again from the old region's texels, so a lake that
 //!   silting has split in two becomes two ponds, and one the channel has run
 //!   into is reabsorbed;
@@ -23,7 +29,22 @@ use crate::terrain::{DEPTH, DOWNSTREAM, EPS, Terrain};
 
 /// The level falls this many widths per river-clock step. With the bed
 /// silting up as well, an oxbow lasts about 8 000 steps.
-const EVAP: f32 = 0.4 * DEPTH / LAKE_LIFE as f32;
+const EVAP: f32 = 0.1 * DEPTH / LAKE_LIFE as f32;
+/// Clock steps for slumping banks to move about a quarter of the way to
+/// their neighbors (see `Terrain::slump`). Over an oxbow's life that spreads
+/// the trench by about a channel width each side.
+const SLUMP_TIME: f32 = 900.0;
+/// Slumping at most moves this fraction of the difference per step.
+const SLUMP_MAX: f32 = 0.2;
+/// The band that slumps reaches this many texels out from the water, over
+/// ground lower than `SLUMP_TOP` widths (so the valley walls stay put).
+const SLUMP_RINGS: usize = 4;
+const SLUMP_TOP: f32 = 0.3;
+/// The level is solved over the pit texels within this many texels of the
+/// region, which the water can spread into in one update.
+const SPREAD: usize = 4;
+/// Bisection steps in solving for the level.
+const SOLVE_STEPS: usize = 24;
 /// Water in fewer texels than this isn't a pond.
 const MIN_POND: usize = 4;
 /// Seeds a new lake gets along its length.
@@ -51,6 +72,10 @@ pub struct Lake {
     /// One texel in each pond (the deepest), as points in cells.
     seeds: Vec<[f32; 2]>,
     level: f32,
+    /// Water, in cubic cells (0 when unknown: it's worked out from the
+    /// level).
+    #[serde(default)]
+    volume: f32,
     /// Texel indices under water as of the last update.
     #[serde(skip)]
     region: Vec<u32>,
@@ -82,6 +107,9 @@ pub struct Lakes {
     pass: u32,
     /// How much has changed since the last draw (see `LEVEL_UNIT`).
     change: f32,
+    /// Scratch for finding texels near a region: the last pass that listed each.
+    mark: Vec<u32>,
+    mark_pass: u32,
 }
 
 /// Whether texel `i` is a hollow that water at `level` fills.
@@ -116,7 +144,7 @@ impl Lakes {
     /// river's surface.
     pub fn add(&mut self, t: &Terrain, pts: &[[f32; 2]]) {
         let seeds = (0..SEEDS).map(|k| pts[(2 * k + 1) * pts.len() / (2 * SEEDS)]).collect();
-        self.list.push(Lake { seeds, level: t.surface(pts[pts.len() / 2][0]), region: Vec::new(), connected: false, near: false });
+        self.list.push(Lake { seeds, level: t.surface(pts[pts.len() / 2][0]), volume: 0.0, region: Vec::new(), connected: false, near: false });
         self.change += 1.0;
     }
 
@@ -128,20 +156,46 @@ impl Lakes {
         }
         let (tw, th) = t.dims();
         self.owner.resize(tw * th, 0);
+        self.mark.resize(tw * th, 0);
+        let (cx, cy) = t.texel();
+        let unit = cx * cy;
         let before: Vec<u32> = self.list.iter().flat_map(|l| l.region.iter().copied()).collect();
+        let mix = (dt / SLUMP_TIME).min(SLUMP_MAX);
         for l in &mut self.list {
+            if l.region.is_empty() {
+                continue;
+            }
+            let bound = SLUMP_TOP * width;
+            let band = near(&mut self.mark, &mut self.mark_pass, t, &l.region, SLUMP_RINGS, |t, i| t.relief_of(i) < bound);
+            t.slump(&band, mix);
             let top = t.surface(l.seeds[0][0]);
+            let cap = if l.near && flood > 0.0 { top + FLOOD_TOP * width * flood } else { top };
+            let old = l.level;
             if l.connected {
                 l.level = top;
             } else {
-                l.level -= EVAP * width * dt;
-                self.change += EVAP * width * dt / (LEVEL_UNIT * DEPTH * width);
+                let pits = near(&mut self.mark, &mut self.mark_pass, t, &l.region, SPREAD, |t, i| t.relief_of(i) < -EPS);
+                // Silting can't raise the level, only spill water.
+                let mut v = l.volume.min(volume(t, &pits, l.level) * unit).min(volume(t, &pits, cap) * unit);
+                v -= EVAP * width * dt * l.region.len() as f32 * unit;
+                l.level = solve(t, &pits, v.max(0.0) / unit, cap);
+                if l.near && flood > 0.0 && l.level < cap {
+                    // A flood fills the hollows to its level.
+                    l.level = cap;
+                    v = volume(t, &pits, cap) * unit;
+                }
+                l.volume = v.max(0.0);
             }
             if l.near && flood > 0.0 {
                 l.level = l.level.max(top + FLOOD_TOP * width * flood);
             }
+            self.change += (l.level - old).abs() / (LEVEL_UNIT * DEPTH * width);
         }
         self.regrow(t);
+        for l in &mut self.list {
+            let v = volume(t, &l.region, l.level) * unit;
+            l.volume = if l.connected || l.volume <= 0.0 { v } else { l.volume.min(v) };
+        }
         t.set_backwater(self.list.iter().filter(|l| l.connected).flat_map(|l| l.region.iter().map(|&i| i as usize)));
         let dried = before.iter().filter(|&&i| self.owner[i as usize] == 0 && !t.under_channel(i as usize)).count();
         for &i in &before {
@@ -174,6 +228,7 @@ impl Lakes {
                 into.seeds.extend(l.seeds);
                 into.region.extend(l.region);
                 into.level = into.level.max(l.level);
+                into.volume += l.volume;
                 into.connected |= l.connected;
                 continue;
             }
@@ -224,6 +279,51 @@ impl Lakes {
             }
         }
     }
+}
+
+/// The texels within `rings` steps of `start` (through texels that `keep`),
+/// including `start`, without repeats.
+fn near(mark: &mut [u32], pass: &mut u32, t: &Terrain, start: &[u32], rings: usize, keep: impl Fn(&Terrain, usize) -> bool) -> Vec<u32> {
+    *pass += 1;
+    let mut out = start.to_vec();
+    out.iter().for_each(|&i| mark[i as usize] = *pass);
+    let mut from = 0;
+    for _ in 0..rings {
+        let to = out.len();
+        for k in from..to {
+            for j in t.neighbors(out[k] as usize) {
+                if mark[j] != *pass && !t.under_channel(j) && keep(t, j) {
+                    mark[j] = *pass;
+                    out.push(j as u32);
+                }
+            }
+        }
+        from = to;
+    }
+    out
+}
+
+/// Water over texels `texels` at `level`, in cubic texel-cells (depth summed).
+fn volume(t: &Terrain, texels: &[u32], level: f32) -> f32 {
+    texels.iter().map(|&i| (level - t.height_of(i as usize)).max(0.0)).sum()
+}
+
+/// The level, at most `cap`, at which `texels` hold `v` (as `volume` sums).
+fn solve(t: &Terrain, texels: &[u32], v: f32, cap: f32) -> f32 {
+    let mut lo = texels.iter().map(|&i| t.height_of(i as usize)).fold(f32::INFINITY, f32::min);
+    if v <= 0.0 || volume(t, texels, cap) <= v {
+        return if v <= 0.0 { lo } else { cap };
+    }
+    let mut hi = cap;
+    for _ in 0..SOLVE_STEPS {
+        let mid = 0.5 * (lo + hi);
+        if volume(t, texels, mid) < v {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
 }
 
 /// Grow the region of lake `l` (owner id `id`) from its seeds and its old
@@ -366,9 +466,71 @@ mod tests {
             steps += 20.0;
             assert!(steps < 3.0 * LAKE_LIFE as f32);
         }
-        assert!(steps > 0.3 * LAKE_LIFE as f32, "{steps}");
+        assert!(steps > 0.25 * LAKE_LIFE as f32, "{steps}");
         // The bed is clay now.
         assert!(t.hardness_at(60.0, t.valley_y(60.0)) > 0.5);
+    }
+
+    /// A horseshoe loop 6 wide, 40 cells across, as an abandoned meander leaves.
+    fn loop_pts(t: &Terrain) -> Vec<[f32; 2]> {
+        let y = t.valley_y(100.0);
+        (0..=60).map(|i| {
+            let a = std::f32::consts::PI * (0.1 + 0.8 * i as f32 / 60.0);
+            [100.0 + 22.0 * a.cos(), y + 22.0 * a.sin() - 10.0]
+        }).collect()
+    }
+
+    /// An abandoned loop slumps wider than its channel, then shrinks and dries.
+    #[test]
+    fn an_oxbow_widens_then_dries() {
+        let mut t = Terrain::new(200, 120, 6.0, 2);
+        let pts = loop_pts(&t);
+        t.carve(&pts, 6.0);
+        let mut lakes = Lakes::default();
+        lakes.add(&t, &pts);
+        lakes.update(&mut t, 6.0, 1.0, 0.0);
+        let first = lakes.list[0].region.len();
+        let (mut most, mut steps) = (first, 0.0);
+        while lakes.len() > 0 {
+            t.update(&[], 6.0, 25.0);
+            lakes.update(&mut t, 6.0, 25.0, 0.0);
+            steps += 25.0;
+            most = most.max(lakes.list.iter().map(|l| l.region.len()).sum());
+            assert!(steps < 12_000.0, "still wet");
+        }
+        // Twice the water surface of the channel's trench, and a long life.
+        assert!(most as f32 > 1.8 * first as f32, "{first} -> {most}");
+        assert!(steps > 5000.0, "{steps}");
+    }
+
+    /// Print the water as text over time, for tuning.
+    #[test]
+    #[ignore]
+    fn show_oxbow() {
+        let mut t = Terrain::new(200, 120, 6.0, 2);
+        let pts = loop_pts(&t);
+        t.carve(&pts, 6.0);
+        let mut lakes = Lakes::default();
+        lakes.add(&t, &pts);
+        let (tw, th) = t.dims();
+        for step in 0..=400 {
+            t.update(&[], 6.0, 25.0);
+            lakes.update(&mut t, 6.0, 25.0, 0.0);
+            if step % 40 == 0 {
+                let n: usize = lakes.list.iter().map(|l| l.region.len()).sum();
+                eprintln!("t={} lakes={} texels={n}", step * 25, lakes.len());
+                let mut g = vec![b'.'; tw * th];
+                for l in &lakes.list {
+                    l.region.iter().for_each(|&i| g[i as usize] = b'#');
+                }
+                for y in (0..th).rev() {
+                    let row = &g[y * tw + 20..y * tw + 60];
+                    if row.contains(&b'#') {
+                        eprintln!("{}", String::from_utf8_lossy(row));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
