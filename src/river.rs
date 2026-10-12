@@ -967,12 +967,14 @@ mod tests {
     fn clay_slows_migration() {
         let mut r = River::with_scale(300, 200, 5.0, 8, 1.0);
         let base = r.velocities();
-        let i = r.nodes.len() / 2;
+        // A node that's clearly moving (the forcing varies from run to run).
+        let n = r.nodes.len();
+        let i = (n / 4..3 * n / 4).max_by(|&a, &b| base[a].abs().total_cmp(&base[b].abs())).unwrap();
         let q = r.bank(i, base[i]);
-        // A plug on the bank this node cuts into.
-        for dx in -3..=3 {
-            for dy in -3..=3 {
-                let k = r.terrain.index_at(q[0] + dx as f32 * 2.0, q[1] + dy as f32 * 2.0);
+        // A plug on the bank this node and its neighbors cut into.
+        for dx in -8..=8 {
+            for dy in -8..=8 {
+                let k = r.terrain.index_at(q[0] + dx as f32, q[1] + dy as f32);
                 r.terrain.harden(k);
             }
         }
