@@ -333,6 +333,10 @@ impl River {
         }
     }
 
+    pub fn terrain(&self) -> &Terrain {
+        &self.terrain
+    }
+
     /// Whether the river has changed enough since the last `raster` to
     /// be worth uploading again.
     pub fn changed(&self) -> bool {

@@ -25,6 +25,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         cell_size: num("--cell", 64.0)?,
         renderer: if args.iter().any(|a| a == "--flat") { Renderer::Flat } else { Renderer::Scene },
         night: args.iter().any(|a| a == "--night"),
+        terrain: num("--terrain", 1.0)?,
+        initial_density: num("--density", 0.5)?,
         steps_per_second: 1.0,
         paused: true,
         ..Params::default()

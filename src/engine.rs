@@ -194,9 +194,10 @@ impl Engine {
         match &mut self.river {
             Some(r) => {
                 let texels = r.raster();
-                self.sim.set_field(&self.device, &self.queue, r.fw, r.fh, &texels);
+                let (rw, rh, relief) = r.terrain().relief_texels();
+                self.sim.set_field(&self.device, &self.queue, r.fw, r.fh, &texels, rw, rh, relief);
             }
-            None => self.sim.set_field(&self.device, &self.queue, 1, 1, &river::dry_field()),
+            None => self.sim.set_field(&self.device, &self.queue, 1, 1, &river::dry_field(), 1, 1, &[0.0]),
         }
         self.river_at = Instant::now();
     }
@@ -318,6 +319,7 @@ impl Engine {
             steps_per_second: self.params.steps_per_second,
             spotting: if self.river.is_some() { self.params.spotting } else { 0.0 },
             river_w: self.river.as_ref().map_or(1.0, River::width),
+            terrain: if self.river.is_some() { self.params.terrain } else { 0.0 },
         }
     }
 
