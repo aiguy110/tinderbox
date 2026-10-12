@@ -11,7 +11,7 @@ use crate::river::{self, River};
 use crate::rng::Rng;
 use crate::save;
 use crate::shaders::hashf;
-use crate::sim::{Sim, StepParams, Strike};
+use crate::sim::{Sim, Snapshot, StepParams, Strike};
 
 const MAX_STEPS_PER_FRAME: u32 = 16;
 /// While paused, a manual step's transitions play at most this fast.
@@ -25,6 +25,8 @@ const FAST_FPS: f64 = 57.0;
 const SAVE_SECS: f64 = 5.0;
 /// The river field is redrawn and uploaded at most this often.
 const RIVER_SECS: f64 = 0.25;
+/// How often the grid is read back to tell the river where the trees are.
+const COVER_SECS: f64 = 2.0;
 
 /// Where the views sit. The grid covers the bounding box of all of them;
 /// cells in gaps between monitors are simulated but not seen.
@@ -76,8 +78,11 @@ pub struct Engine {
     adapt: Adapt,
     bolts: bool,
     saved_at: Instant,
+    /// A capture under way is to be saved when it arrives.
+    saving: bool,
     pub river: Option<River>,
     river_at: Instant,
+    cover_at: Instant,
 }
 
 /// Lower the render resolution while frames are slow, and creep back up after
@@ -119,8 +124,10 @@ impl Engine {
             adapt: Adapt::default(),
             bolts: false,
             saved_at: now,
+            saving: false,
             river: None,
             river_at: now,
+            cover_at: now,
         };
         e.reset_resolution();
         e.fit_grid();
@@ -251,27 +258,42 @@ impl Engine {
         }
     }
 
-    /// Save the grid every few seconds. Call once a frame; the copy back from
-    /// the GPU arrives a frame or so later.
+    /// Copy the grid back every few seconds, to save it and to show the
+    /// river where the trees are. Call once a frame; the copy arrives a
+    /// frame or so later.
     pub fn autosave(&mut self) {
         if let Some(s) = self.sim.captured() {
-            save::store(&s, self.cell_size);
-            self.store_river();
+            self.got_capture(&s);
         }
         if self.saved_at.elapsed().as_secs_f64() >= SAVE_SECS {
             self.saved_at = Instant::now();
+            self.saving = true;
             self.sim.capture(&self.device, &self.queue);
+        }
+        if self.river.is_some() && self.cover_at.elapsed().as_secs_f64() >= COVER_SECS {
+            self.cover_at = Instant::now();
+            self.sim.capture(&self.device, &self.queue);
+        }
+    }
+
+    fn got_capture(&mut self, s: &Snapshot) {
+        if let Some(r) = &mut self.river {
+            r.set_cover(&s.cells, s.width, s.height);
+        }
+        if std::mem::take(&mut self.saving) {
+            save::store(s, self.cell_size);
+            self.store_river();
         }
     }
 
     /// Save the grid now, waiting for the GPU.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_now(&mut self) {
+        self.saving = true;
         self.sim.capture(&self.device, &self.queue);
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         if let Some(s) = self.sim.captured() {
-            save::store(&s, self.cell_size);
-            self.store_river();
+            self.got_capture(&s);
         }
     }
 

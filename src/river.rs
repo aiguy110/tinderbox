@@ -21,6 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::rng::Rng;
+use crate::shaders::state::{TREE, WATER};
 
 /// Ω and Γ in the migration rate: the local curvature's weight (negative:
 /// it straightens) and the upstream curvature's (it bends further).
@@ -50,6 +51,11 @@ const MAX_TEXELS: f32 = 1.5e6;
 const FORCING: f32 = 0.15;
 /// Trees grow this much faster on the bank (see `riparian`).
 pub const RIPARIAN: f32 = 1.0;
+/// Roots hold banks together: a bend whose cut bank is bare migrates at
+/// `BARE` × the usual rate, and one under full tree cover at `WOODED` ×.
+/// Half cover is the usual rate.
+const BARE: f32 = 1.6;
+const WOODED: f32 = 0.4;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Lake {
@@ -95,6 +101,11 @@ pub struct River {
     cut: bool,
     /// The forcing: (amplitude, wavenumber, phase) of waves along x.
     forcing: Vec<(f32, f32, f32)>,
+    /// Tree cover of the land in `cover_block`-cell squares, `cover_w` per
+    /// row, from the last grid read back (see `set_cover`); empty until then.
+    cover: Vec<f32>,
+    cover_w: usize,
+    cover_block: f32,
 }
 
 /// Field texels per cell: fine enough for smooth banks on big cells, and
@@ -187,6 +198,9 @@ impl River {
             moved: 0.0,
             cut: true,
             forcing: Vec::new(),
+            cover: Vec::new(),
+            cover_w: 0,
+            cover_block: 1.0,
         };
         r.alloc(scale);
         r
@@ -247,6 +261,7 @@ impl River {
             *p = [p[0] * kx, p[1] * ky];
         }
         (self.gw, self.gh) = (gw, gh);
+        self.cover.clear();
         self.width = Self::fit_width(self.width, gh);
         self.alloc(default_scale(gw, gh));
         self.resample();
@@ -341,7 +356,7 @@ impl River {
             .collect();
         let decay = (-SPACING / MEMORY).exp();
         let (mut acc, mut wsum) = (0.0f32, 0.0f32);
-        (0..n)
+        let v: Vec<f32> = (0..n)
             .map(|i| {
                 acc = acc * decay + r0[i];
                 wsum = wsum * decay + 1.0;
@@ -351,7 +366,65 @@ impl River {
                 // Positive curvature (bending left) moves the node right.
                 KL * (r1 + FORCING * f) * self.mobility(x)
             })
-            .collect()
+            .collect();
+        if self.cover.is_empty() {
+            return v;
+        }
+        // Scale by how easily the bank each node is cutting into erodes,
+        // smoothed along the channel so it doesn't start node-scale wiggles.
+        let m: Vec<f32> = (0..n)
+            .map(|i| {
+                let (a, b) = (self.nodes[i.saturating_sub(1)], self.nodes[(i + 1).min(n - 1)]);
+                let (tx, ty) = (b[0] - a[0], b[1] - a[1]);
+                let l = (tx * tx + ty * ty).sqrt().max(1e-6);
+                // Halfway across the strip of bank the node is moving into.
+                let o = v[i].signum() * w;
+                let p = self.nodes[i];
+                let c = self.cover_at(p[0] + o * ty / l, p[1] - o * tx / l);
+                WOODED + (BARE - WOODED) * (1.0 - c)
+            })
+            .collect();
+        let m: Vec<f32> = (0..n).map(|i| 0.25 * m[i.saturating_sub(1)] + 0.5 * m[i] + 0.25 * m[(i + 1).min(n - 1)]).collect();
+        v.iter().zip(m).map(|(v, m)| v * m).collect()
+    }
+
+    /// Take tree cover from a copy of the grid (`width`×`height` RGBA cells,
+    /// state in r), counting only land. Grids of another size are ignored.
+    pub fn set_cover(&mut self, cells: &[u8], width: u32, height: u32) {
+        if (width, height) != (self.gw, self.gh) || cells.len() != (width * height * 4) as usize {
+            return;
+        }
+        let b = (self.width * 0.5).round().max(1.0) as usize;
+        let (gw, gh) = (width as usize, height as usize);
+        let (cw, ch) = (gw.div_ceil(b), gh.div_ceil(b));
+        let mut trees = vec![0u32; cw * ch];
+        let mut land = vec![0u32; cw * ch];
+        for y in 0..gh {
+            for x in 0..gw {
+                let s = cells[(y * gw + x) * 4];
+                let k = (y / b) * cw + x / b;
+                land[k] += (s != WATER) as u32;
+                trees[k] += (s == TREE) as u32;
+            }
+        }
+        // All-water squares count as half covered, the neutral rate.
+        self.cover = trees.iter().zip(&land).map(|(&t, &l)| if l == 0 { 0.5 } else { t as f32 / l as f32 }).collect();
+        self.cover_w = cw;
+        self.cover_block = b as f32;
+    }
+
+    /// Tree cover at a point in cells, interpolated between squares.
+    fn cover_at(&self, x: f32, y: f32) -> f32 {
+        let cw = self.cover_w as i32;
+        let ch = (self.cover.len() / self.cover_w) as i32;
+        let (fx, fy) = (x / self.cover_block - 0.5, y / self.cover_block - 0.5);
+        let (x0, y0) = (fx.floor(), fy.floor());
+        let (tx, ty) = (fx - x0, fy - y0);
+        let at = |x: i32, y: i32| self.cover[(y.clamp(0, ch - 1) * cw + x.clamp(0, cw - 1)) as usize];
+        let (x0, y0) = (x0 as i32, y0 as i32);
+        let top = at(x0, y0 + 1) * (1.0 - tx) + at(x0 + 1, y0 + 1) * tx;
+        let bottom = at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx;
+        bottom * (1.0 - ty) + top * ty
     }
 
     /// Respace the nodes evenly along the channel, keeping both ends.
@@ -583,6 +656,25 @@ mod tests {
         assert!(water > 400 * 6 && water < 400 * 6 * 6, "water {water}");
         // The river crosses every column (so it splits the forest).
         assert!((0..400).all(|x| (0..200).any(|y| r.water(x, y))));
+    }
+
+    #[test]
+    fn bare_banks_erode_faster() {
+        let (w, h) = (200u32, 100u32);
+        let mut r = River::with_scale(w, h, 4.0, 7, 1.0);
+        let base = r.velocities();
+        let grid = |s: u8| vec![s; (w * h * 4) as usize];
+        r.set_cover(&grid(TREE), w, h);
+        let wooded = r.velocities();
+        r.set_cover(&grid(crate::shaders::state::EMPTY), w, h);
+        let bare = r.velocities();
+        for i in 0..base.len() {
+            assert!((wooded[i] - WOODED * base[i]).abs() <= 1e-6 + 1e-4 * base[i].abs());
+            assert!((bare[i] - BARE * base[i]).abs() <= 1e-6 + 1e-4 * base[i].abs());
+        }
+        // Another size of grid is ignored.
+        r.set_cover(&grid(TREE), w + 1, h);
+        assert_eq!(r.velocities(), bare);
     }
 
     #[test]
