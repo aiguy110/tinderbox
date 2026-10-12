@@ -152,6 +152,7 @@ pub fn panel(ctx: &egui::Context, p: &mut Params, stats: &str, hint: &str) -> Ac
                     slider(ui, "River width", &mut p.river_width, 4.0..=200.0, true, 1.0, |v| format!("{v}px"));
                     slider(ui, "Meander rate", &mut p.meander, 0.1..=50.0, true, 0.0, |v| format!("{v:.1}×"));
                     slider(ui, "Ember jumps", &mut p.spotting, 0.0..=0.05, false, 0.0005, |v| format!("{:.2}%", v * 100.0));
+                    slider(ui, "Terrain", &mut p.terrain, 0.0..=2.0, false, 0.0, |v| format!("{v:.1}×"));
                 }
 
                 ui.add_space(8.0);

@@ -9,10 +9,15 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::rng::Rng;
 use crate::shaders::{self, MAX_STRIKES, SETTLED, cause, state};
+use crate::terrain;
 
 pub const STATE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Uint;
 /// The river field (see river.rs).
 const FIELD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The terrain's relief (see terrain.rs), read with textureLoad.
+const RELIEF_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+/// Tries at finding a lightning strike a ridge accepts before taking the last.
+const STRIKE_TRIES: u32 = 12;
 
 /// Lightning strikes per second that get a bolt. Strikes are split between a
 /// short list picked here (so we know where they land) and the rest, which the
@@ -28,6 +33,8 @@ pub struct StepParams {
     pub spotting: f32,
     /// River width in cells.
     pub river_w: f32,
+    /// How much the terrain's slope, height and moisture matter (0 = not at all).
+    pub terrain: f32,
 }
 
 /// A cell that lightning set alight.
@@ -48,11 +55,16 @@ struct StepUniforms {
     strike_count: u32,
     spotting: f32,
     river_w: f32,
+    terrain: f32,
+    /// Mean of the strike weights over the grid, so ridges don't change the rate.
+    strike_mean: f32,
+    _pad: [u32; 2],
     strikes: [[i32; 4]; MAX_STRIKES],
 }
 
 struct Field {
     tex: wgpu::Texture,
+    relief: wgpu::Texture,
     bind: wgpu::BindGroup,
 }
 
@@ -96,10 +108,16 @@ pub struct Sim {
     pub generation: u64,
     /// Binds a state texture for reading in a fragment shader (group 0).
     pub state_layout: wgpu::BindGroupLayout,
-    /// Binds the river field and a linear sampler (group 2).
+    /// Binds the river field, a linear sampler and the terrain relief (group 2).
     pub field_layout: wgpu::BindGroupLayout,
     field: Field,
     field_sampler: wgpu::Sampler,
+    /// The relief on the CPU, for picking lightning strikes: texels across
+    /// and up, heights, and their strike weights at `weights_for` strength.
+    relief: (u32, u32, Vec<f32>),
+    weights: Vec<f32>,
+    weights_for: f32,
+    strike_mean: f32,
     buffers: Option<[Buffer; 2]>,
     current: usize,
     step_pipeline: wgpu::RenderPipeline,
@@ -152,6 +170,16 @@ impl Sim {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let field_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -160,7 +188,7 @@ impl Sim {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let field = make_field(device, &field_layout, &field_sampler, 1, 1);
+        let field = make_field(device, &field_layout, &field_sampler, (1, 1), (1, 1));
         let uniform_layout = uniform_layout(device, "step uniforms");
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("step uniforms"),
@@ -200,6 +228,10 @@ impl Sim {
             field_layout,
             field,
             field_sampler,
+            relief: (1, 1, vec![0.0]),
+            weights: vec![1.0],
+            weights_for: 0.0,
+            strike_mean: 1.0,
             buffers: None,
             current: 0,
             step_pipeline,
@@ -225,11 +257,13 @@ impl Sim {
         &self.field.bind
     }
 
-    /// Replace the river field: `w`×`h` RGBA f16 texels.
-    pub fn set_field(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, texels: &[u16]) {
-        let size = self.field.tex.size();
-        if (size.width, size.height) != (w, h) {
-            self.field = make_field(device, &self.field_layout, &self.field_sampler, w, h);
+    /// Replace the river field (`w`×`h` RGBA f16 texels) and the terrain
+    /// relief (`rw`×`rh` heights).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_field(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, texels: &[u16], rw: u32, rh: u32, relief: &[f32]) {
+        let (size, rsize) = (self.field.tex.size(), self.field.relief.size());
+        if (size.width, size.height, rsize.width, rsize.height) != (w, h, rw, rh) {
+            self.field = make_field(device, &self.field_layout, &self.field_sampler, (w, h), (rw, rh));
         }
         queue.write_texture(
             self.field.tex.as_image_copy(),
@@ -237,6 +271,39 @@ impl Sim {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 8), rows_per_image: None },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
+        queue.write_texture(
+            self.field.relief.as_image_copy(),
+            bytemuck::cast_slice(relief),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rw * 4), rows_per_image: None },
+            wgpu::Extent3d { width: rw, height: rh, depth_or_array_layers: 1 },
+        );
+        self.relief = (rw, rh, relief.to_vec());
+        self.weights_for = f32::NAN;
+    }
+
+    /// Strike weights for terrain strength `t`, and their mean.
+    fn set_weights(&mut self, t: f32) {
+        self.weights = self.relief.2.iter().map(|&r| terrain::strike_weight(r, t)).collect();
+        self.strike_mean = (self.weights.iter().sum::<f32>() / self.weights.len() as f32).max(terrain::MIN_STRIKE_MEAN);
+        self.weights_for = t;
+    }
+
+    /// A random cell, favoring ridges when the terrain matters.
+    fn strike_cell(&mut self, t: f32) -> (i32, i32) {
+        let (rw, rh, _) = self.relief;
+        let mut cell = (0, 0);
+        for _ in 0..if t > 0.0 { STRIKE_TRIES } else { 1 } {
+            let (x, y) = (self.rng.below(self.width), self.rng.below(self.height));
+            cell = (x as i32, y as i32);
+            if t <= 0.0 {
+                break;
+            }
+            let (tx, ty) = ((x * rw / self.width) as usize, (y * rh / self.height) as usize);
+            if self.rng.f32() < self.weights[ty * rw as usize + tx] {
+                break;
+            }
+        }
+        cell
     }
 
     /// Size the grid. Cells overlapping the old grid are kept unless `fresh`
@@ -287,7 +354,12 @@ impl Sim {
 
     /// Advance one step. Strikes that lit a tree come back from `hits()`.
     pub fn step(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, p: &StepParams) {
-        let Some(buffers) = &self.buffers else { return };
+        if self.buffers.is_none() {
+            return;
+        }
+        if p.terrain > 0.0 && p.terrain != self.weights_for {
+            self.set_weights(p.terrain);
+        }
         let cells = (self.width * self.height) as f64;
         let expected = p.lightning as f64 * cells;
         let listed_rate = expected.min(BOLTS_PER_SECOND / p.steps_per_second as f64).min(MAX_STRIKES as f64 / 4.0);
@@ -301,11 +373,14 @@ impl Sim {
             strike_count: n as u32,
             spotting: p.spotting,
             river_w: p.river_w,
+            terrain: p.terrain,
+            strike_mean: if p.terrain > 0.0 { self.strike_mean } else { 1.0 },
+            _pad: [0; 2],
             strikes: [[0; 4]; MAX_STRIKES],
         };
         let mut strikes = Vec::with_capacity(n);
         for s in u.strikes.iter_mut().take(n) {
-            let (x, y) = (self.rng.below(self.width) as i32, self.rng.below(self.height) as i32);
+            let (x, y) = self.strike_cell(p.terrain);
             *s = [x, y, 0, 0];
             strikes.push(Strike { x, y });
         }
@@ -313,6 +388,7 @@ impl Sim {
         // the next submit, so several steps can't share one.
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
 
+        let Some(buffers) = &self.buffers else { return };
         let src = &buffers[self.current];
         let dst = &buffers[1 - self.current];
         let mut enc = device.create_command_encoder(&Default::default());
@@ -504,27 +580,35 @@ impl Sim {
     }
 }
 
-fn make_field(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler, w: u32, h: u32) -> Field {
-    let tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("river field"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: FIELD_FORMAT,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
+/// The river field texture (`(w, h)` texels) and the relief texture
+/// (`(rw, rh)`), bound together.
+fn make_field(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler, (w, h): (u32, u32), (rw, rh): (u32, u32)) -> Field {
+    let texture = |label, w, h, format| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    };
+    let tex = texture("river field", w, h, FIELD_FORMAT);
+    let relief = texture("relief", rw, rh, RELIEF_FORMAT);
     let view = tex.create_view(&Default::default());
+    let relief_view = relief.create_view(&Default::default());
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("river field"),
         layout,
         entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&relief_view) },
         ],
     });
-    Field { tex, bind }
+    Field { tex, relief, bind }
 }
 
 /// Bytes per row of a texture copied into a buffer, which must be a multiple

@@ -69,6 +69,9 @@ pub struct Params {
     pub meander: f32,
     /// Chance per step that a tree on the bank catches from fire across the river.
     pub spotting: f32,
+    /// How much the valley's slopes, height and moisture matter to fire,
+    /// growth and lightning (0 = not at all; see terrain.rs).
+    pub terrain: f32,
     #[serde(skip_serializing)]
     pub paused: bool,
     pub panel_hidden: bool,
@@ -95,6 +98,7 @@ impl Default for Params {
             river_width: 20.0,
             meander: 1.0,
             spotting: 0.002,
+            terrain: 1.0,
             paused: false,
             panel_hidden: false,
         }

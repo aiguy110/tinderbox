@@ -62,6 +62,20 @@ fn prelude() -> String {
     let mut s: String = consts.iter().map(|(n, v)| format!("const {n}: u32 = {v}u;\n")).collect();
     s += &format!("const MAX_STRIKES: u32 = {MAX_STRIKES}u;\n");
     s += &format!("const RIPARIAN: f32 = {:?};\n", crate::river::RIPARIAN);
+    use crate::terrain::*;
+    for (n, v) in [
+        ("RELIEF_SCALE", RELIEF_SCALE),
+        ("SLOPE_K", SLOPE_K),
+        ("SLOPE_MIN", SLOPE_MIN),
+        ("JUMP_K", JUMP_K),
+        ("JUMP_DEADZONE", JUMP_DEADZONE),
+        ("JUMP_MAX", JUMP_MAX),
+        ("MOIST_WET", MOIST_WET),
+        ("MOIST_DRY", MOIST_DRY),
+        ("STRIKE_FLOOR", STRIKE_FLOOR),
+    ] {
+        s += &format!("const {n}: f32 = {v:?};\n");
+    }
     let nb: Vec<String> = NEIGHBORS.iter().map(|(x, y)| format!("vec2<i32>({x}, {y})")).collect();
     s += &format!("const NEIGHBORS = array<vec2<i32>, 8>({});\n", nb.join(", "));
     s + include_str!("shaders/common.wgsl")

@@ -312,6 +312,13 @@ impl Terrain {
         t.pits = (0..t.rel.len() as u32).filter(|&i| t.rel[i as usize] < -EPS).collect();
         Some(t)
     }
+
+    /// The relief texels for the GPU: texels across and up, and heights with
+    /// rows from y = 0. Texel (i, j) is centered at ((i + ½) × gw / tw, ...),
+    /// wrapping in x, as `relief_at` reads it.
+    pub fn relief_texels(&self) -> (u32, u32, &[f32]) {
+        (self.tw as u32, self.th as u32, &self.rel)
+    }
 }
 
 /// Height of the valley wall `t` cells past the floor's edge: curving up
@@ -387,6 +394,41 @@ fn unbase64(s: &str) -> Option<Vec<u8>> {
         out.extend_from_slice(&n.to_be_bytes()[1..chunk.len()]);
     }
     Some(out)
+}
+
+/// How the terrain affects the fire (the shaders get these from shaders.rs).
+///
+/// Relief (cells) at which ground counts as high: moisture, lightning and
+/// the like ease in over this height.
+pub const RELIEF_SCALE: f32 = 4.0;
+/// Spread onto a tree downhill of the fire is slowed: its chance is
+/// 1 - `SLOPE_K` × strength × slope, but not below `SLOPE_MIN`. A valley wall
+/// (slope up to 0.15) then keeps a quarter to a half of the spread.
+pub const SLOPE_K: f32 = 4.0;
+pub const SLOPE_MIN: f32 = 0.1;
+/// Fire reaches a tree two cells uphill with chance `JUMP_K` × strength ×
+/// (slope - `JUMP_DEADZONE`), at most `JUMP_MAX` a step; gentle slopes
+/// (floor undulations) don't count.
+pub const JUMP_K: f32 = 3.0;
+pub const JUMP_DEADZONE: f32 = 0.04;
+pub const JUMP_MAX: f32 = 0.5;
+/// Growth is multiplied by `MOIST_WET` on the floor, easing to `MOIST_DRY`
+/// at `RELIEF_SCALE` above it (both pulled toward 1 or past it by strength).
+pub const MOIST_WET: f32 = 1.2;
+pub const MOIST_DRY: f32 = 0.7;
+/// Lightning's pull toward high ground: the weight of a strike on the floor,
+/// rising to 1 at `RELIEF_SCALE` (scaled out by strength, as 1 - strength ×
+/// (1 - weight)).
+pub const STRIKE_FLOOR: f32 = 0.3;
+/// The mean strike weight never counts as less than this.
+pub const MIN_STRIKE_MEAN: f32 = 0.05;
+
+/// How likely a lightning strike at ground `relief` cells high is to be kept,
+/// for terrain `strength`. The shader's `strike_weight` does the same.
+pub fn strike_weight(relief: f32, strength: f32) -> f32 {
+    let t = (relief / RELIEF_SCALE).clamp(0.0, 1.0);
+    let w = STRIKE_FLOOR + (1.0 - STRIKE_FLOOR) * t * t * (3.0 - 2.0 * t);
+    (1.0 - strength * (1.0 - w)).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
